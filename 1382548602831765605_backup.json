@@ -1,0 +1,291 @@
+{
+    "roles": [
+        {
+            "name": "Instagram",
+            "color": 0,
+            "permissions": 0,
+            "hoist": false,
+            "mentionable": false
+        },
+        {
+            "name": "Apex Champion",
+            "color": 0,
+            "permissions": 0,
+            "hoist": false,
+            "mentionable": false
+        },
+        {
+            "name": "Nessie Collector",
+            "color": 0,
+            "permissions": 0,
+            "hoist": false,
+            "mentionable": false
+        },
+        {
+            "name": "VIP",
+            "color": 0,
+            "permissions": 0,
+            "hoist": false,
+            "mentionable": false
+        },
+        {
+            "name": "Notifications",
+            "color": 0,
+            "permissions": 0,
+            "hoist": false,
+            "mentionable": false
+        },
+        {
+            "name": "YouTube",
+            "color": 0,
+            "permissions": 0,
+            "hoist": false,
+            "mentionable": false
+        },
+        {
+            "name": "TikTok",
+            "color": 0,
+            "permissions": 0,
+            "hoist": false,
+            "mentionable": false
+        },
+        {
+            "name": "Twitch",
+            "color": 0,
+            "permissions": 0,
+            "hoist": false,
+            "mentionable": false
+        },
+        {
+            "name": "Xbox",
+            "color": 0,
+            "permissions": 0,
+            "hoist": false,
+            "mentionable": false
+        },
+        {
+            "name": "PlayStation",
+            "color": 0,
+            "permissions": 0,
+            "hoist": false,
+            "mentionable": false
+        },
+        {
+            "name": "PC",
+            "color": 0,
+            "permissions": 0,
+            "hoist": false,
+            "mentionable": false
+        },
+        {
+            "name": "YouTube",
+            "color": 0,
+            "permissions": 1024,
+            "hoist": false,
+            "mentionable": false
+        },
+        {
+            "name": "Server Booster",
+            "color": 16023551,
+            "permissions": 2222085186636353,
+            "hoist": false,
+            "mentionable": false
+        },
+        {
+            "name": "appeal.gg",
+            "color": 0,
+            "permissions": 1409286147236,
+            "hoist": false,
+            "mentionable": false
+        },
+        {
+            "name": "Nessie",
+            "color": 3066993,
+            "permissions": 110088605322816,
+            "hoist": true,
+            "mentionable": true
+        },
+        {
+            "name": "Arcane",
+            "color": 15844367,
+            "permissions": 1495521290494,
+            "hoist": false,
+            "mentionable": false
+        },
+        {
+            "name": "Wattson",
+            "color": 16318684,
+            "permissions": 1101596716286,
+            "hoist": false,
+            "mentionable": false
+        },
+        {
+            "name": "\u26a1 Grid Guardian\u26a1",
+            "color": 0,
+            "permissions": 268560384,
+            "hoist": false,
+            "mentionable": false
+        },
+        {
+            "name": "Pylon",
+            "color": 6881,
+            "permissions": 1792195363340287,
+            "hoist": true,
+            "mentionable": true
+        }
+    ],
+    "categories": [
+        {
+            "name": "How to get started"
+        },
+        {
+            "name": "Friendly updates"
+        },
+        {
+            "name": "Text Channels"
+        },
+        {
+            "name": "Find your 1v1 partner here\u2b07\ufe0f"
+        },
+        {
+            "name": "Casual"
+        },
+        {
+            "name": "Ranked\u2b07\ufe0f"
+        },
+        {
+            "name": "Memes\ud83d\ude02"
+        },
+        {
+            "name": "Other"
+        },
+        {
+            "name": "Voice Channels"
+        },
+        {
+            "name": "Tickets"
+        }
+    ],
+    "channels": [
+        {
+            "name": "ticket-wattasticc",
+            "type": "text",
+            "category": null
+        },
+        {
+            "name": "socials\ud83e\udd75",
+            "type": "text",
+            "category": "Friendly updates"
+        },
+        {
+            "name": "clips\ud83d\udcf2",
+            "type": "text",
+            "category": "Memes\ud83d\ude02"
+        },
+        {
+            "name": "platinum-diamond",
+            "type": "text",
+            "category": "Ranked\u2b07\ufe0f"
+        },
+        {
+            "name": "introductions",
+            "type": "text",
+            "category": "How to get started"
+        },
+        {
+            "name": "General",
+            "type": "voice",
+            "category": "Voice Channels"
+        },
+        {
+            "name": "masters-pred",
+            "type": "voice",
+            "category": "Voice Channels"
+        },
+        {
+            "name": "banner-showcase",
+            "type": "text",
+            "category": "Other"
+        },
+        {
+            "name": "\ud83d\udc4b-welcome",
+            "type": "text",
+            "category": null
+        },
+        {
+            "name": "pubs",
+            "type": "text",
+            "category": "Casual"
+        },
+        {
+            "name": "irl-selfies-or-pics\ud83e\udd33",
+            "type": "text",
+            "category": "Other"
+        },
+        {
+            "name": "pubs",
+            "type": "voice",
+            "category": "Voice Channels"
+        },
+        {
+            "name": "rules\ud83d\udcd6",
+            "type": "text",
+            "category": "How to get started"
+        },
+        {
+            "name": "screenshots\ud83d\udcf1",
+            "type": "text",
+            "category": "Memes\ud83d\ude02"
+        },
+        {
+            "name": "masters-predator",
+            "type": "text",
+            "category": "Ranked\u2b07\ufe0f"
+        },
+        {
+            "name": "logs",
+            "type": "text",
+            "category": "Other"
+        },
+        {
+            "name": "tips-and-trick-for-wattson\ud83d\ude00",
+            "type": "text",
+            "category": "Other"
+        },
+        {
+            "name": "1v1s",
+            "type": "text",
+            "category": "Find your 1v1 partner here\u2b07\ufe0f"
+        },
+        {
+            "name": "announcements",
+            "type": "text",
+            "category": "Friendly updates"
+        },
+        {
+            "name": "bronze-gold",
+            "type": "voice",
+            "category": "Voice Channels"
+        },
+        {
+            "name": "plat-diamond",
+            "type": "voice",
+            "category": "Voice Channels"
+        },
+        {
+            "name": "general\ud83d\udde3\ufe0f",
+            "type": "text",
+            "category": "Text Channels"
+        },
+        {
+            "name": "bronze-gold",
+            "type": "text",
+            "category": "Ranked\u2b07\ufe0f"
+        },
+        {
+            "name": "suggestions",
+            "type": "text",
+            "category": null
+        }
+    ]
+}
