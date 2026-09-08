@@ -142,13 +142,14 @@ class Apex(commands.Cog):
 
             return None, (
                 "❌ `APEX_API_KEY` is missing from "
-                "your `.env` file."
+                "your Railway variables."
             )
 
         url = f"{API_BASE_URL}{endpoint}"
 
         headers = {
-            "Authorization": APEX_API_KEY
+            "Authorization": APEX_API_KEY,
+            "Accept": "application/json"
         }
 
         if params is None:
@@ -169,23 +170,57 @@ class Apex(commands.Cog):
                         )
                     ) as response:
 
+                        # =================================
+                        # SUCCESS
+                        # =================================
+
                         if response.status == 200:
 
                             try:
-                                data = await response.json()
+
+                                data = await response.json(
+                                    content_type=None
+                                )
+
+                                if not isinstance(
+                                    data,
+                                    dict
+                                ):
+
+                                    return None, (
+                                        "❌ The Apex API returned "
+                                        "an unexpected response."
+                                    )
 
                                 return data, None
 
-                            except Exception:
+                            except Exception as error:
+
+                                print(
+                                    f"❌ Apex API JSON error: "
+                                    f"{error}"
+                                )
+
+                                raw_response = (
+                                    await response.text()
+                                )
+
+                                print(
+                                    "❌ Apex API response:"
+                                )
+
+                                print(
+                                    raw_response[:2000]
+                                )
 
                                 return None, (
                                     "❌ The Apex API returned "
                                     "invalid data."
                                 )
 
-                        # ---------------------------------
+                        # =================================
                         # ERROR CODES
-                        # ---------------------------------
+                        # =================================
 
                         if response.status == 400:
 
@@ -686,65 +721,106 @@ class Apex(commands.Cog):
             color=EMBED_COLOR
         )
 
-        if isinstance(data, dict):
+        if not isinstance(data, dict):
 
-            services = data.get(
-                "Origin_login",
-                {}
+            return await ctx.send(
+                "❌ The Apex API returned an unexpected "
+                "server status response."
             )
 
-            if services:
+        # ==================================================
+        # SERVER STATUS DATA
+        # ==================================================
 
-                embed.add_field(
-                    name="EA / Origin",
-                    value=(
-                        str(services)
-                        [:500]
-                    ),
-                    inline=False
+        services = data.get(
+            "Origin_login",
+            {}
+        )
+
+        if isinstance(services, dict) and services:
+
+            status = (
+                services.get("Status")
+                or services.get("status")
+                or services.get("statusText")
+                or "Unknown"
+            )
+
+            if isinstance(status, dict):
+
+                status = (
+                    status.get("status")
+                    or status.get("Status")
+                    or str(status)
                 )
 
-            # Add major API categories.
-            count = 0
+            embed.add_field(
+                name="EA / Origin",
+                value=str(status)[:500],
+                inline=False
+            )
 
-            for name, value in data.items():
+        # ==================================================
+        # OTHER SERVICES
+        # ==================================================
 
-                if name == "Origin_login":
-                    continue
+        count = 0
 
-                if count >= 8:
-                    break
+        for name, value in data.items():
 
-                if isinstance(
-                    value,
-                    dict
-                ):
+            if name == "Origin_login":
+                continue
 
-                    status = value.get(
-                        "Status",
-                        value.get(
-                            "status",
-                            "Unknown"
-                        )
+            if count >= 8:
+                break
+
+            if isinstance(value, dict):
+
+                status = (
+                    value.get("Status")
+                    or value.get("status")
+                    or value.get("statusText")
+                    or value.get("StatusText")
+                    or "Unknown"
+                )
+
+                if isinstance(status, dict):
+
+                    status = (
+                        status.get("status")
+                        or status.get("Status")
+                        or str(status)
                     )
 
-                    if isinstance(
-                        status,
-                        dict
-                    ):
+                embed.add_field(
+                    name=name.replace(
+                        "_",
+                        " "
+                    ).title(),
+                    value=str(status)[:200],
+                    inline=True
+                )
 
-                        status = str(status)
+                count += 1
 
-                    embed.add_field(
-                        name=name.replace(
-                            "_",
-                            " "
-                        ).title(),
-                        value=str(status)[:200],
-                        inline=True
-                    )
+        # ==================================================
+        # FALLBACK
+        # ==================================================
 
-                    count += 1
+        if len(embed.fields) == 0:
+
+            embed.description = (
+                "The Apex API responded, but it did not "
+                "return recognizable server status fields."
+            )
+
+            print(
+                "⚠️ Apex /servers response:"
+            )
+
+            print(
+                str(data)[:3500]
+            )
 
         embed.set_footer(
             text="Data from apexlegendsstatus.com"
