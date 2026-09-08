@@ -3,7 +3,6 @@ import asyncio
 
 import aiohttp
 import discord
-
 from discord.ext import commands
 
 
@@ -59,7 +58,7 @@ def find_stat(data, stat_name):
     stat_name = stat_name.lower()
 
     # ======================================================
-    # GLOBAL TRACKERS
+    # GLOBAL DATA
     # ======================================================
 
     global_data = data.get(
@@ -79,7 +78,7 @@ def find_stat(data, stat_name):
         )
 
     # ======================================================
-    # LEGEND TRACKERS
+    # LEGEND DATA
     # ======================================================
 
     legends = data.get(
@@ -91,6 +90,12 @@ def find_stat(data, stat_name):
         "all",
         {}
     )
+
+    if not isinstance(
+        all_legends,
+        dict
+    ):
+        return None
 
     for legend_data in all_legends.values():
 
@@ -149,8 +154,8 @@ class Apex(commands.Cog):
 
         self.bot = bot
 
-        # Prevent multiple API requests
-        # from happening at the same time.
+        # Prevent multiple API requests from
+        # happening at exactly the same time.
         self.request_lock = asyncio.Lock()
 
 
@@ -161,299 +166,342 @@ class Apex(commands.Cog):
     async def api_request(
         self,
         endpoint,
-        params=None,
-        fallback_endpoint=None
+        params=None
     ):
 
-        if not APEX_API_KEY:
+        # --------------------------------------------------
+        # CHECK API KEY
+        # --------------------------------------------------
+
+        api_key = os.getenv(
+            "APEX_API_KEY"
+        )
+
+        if not api_key:
+
+            print(
+                "❌ APEX_API_KEY is missing."
+            )
 
             return None, (
-                "❌ `APEX_API_KEY` is missing from "
-                "your Railway variables."
+                "❌ `APEX_API_KEY` is missing "
+                "from your Railway variables."
             )
+
+        # --------------------------------------------------
+        # PARAMETERS
+        # --------------------------------------------------
 
         if params is None:
 
             params = {}
 
-        # ==================================================
-        # API KEY
-        # ==================================================
+        else:
 
-        # The Apex Legends Status API officially supports
-        # the API key through the "auth" query parameter.
-        params = dict(params)
+            # Don't modify the original dictionary.
+            params = dict(params)
 
-        params["auth"] = APEX_API_KEY
+        # --------------------------------------------------
+        # IMPORTANT:
+        # The Apex Legends Status documentation supports
+        # authentication using ?auth=API_KEY.
+        #
+        # We are using BOTH:
+        #
+        # 1. auth query parameter
+        # 2. Authorization header
+        #
+        # This makes the requests more reliable.
+        # --------------------------------------------------
 
-        endpoints = [endpoint]
+        params["auth"] = api_key
 
-        if fallback_endpoint:
+        url = (
+            f"{API_BASE_URL}"
+            f"{endpoint}"
+        )
 
-            endpoints.append(
-                fallback_endpoint
+        headers = {
+            "Authorization": api_key,
+            "Accept": "application/json",
+            "User-Agent": (
+                "GridGuardian/1.0 "
+                "(Discord Apex Bot)"
             )
+        }
+
+        # --------------------------------------------------
+        # REQUEST
+        # --------------------------------------------------
 
         try:
 
             async with self.request_lock:
 
-                timeout = aiohttp.ClientTimeout(
-                    total=15
-                )
-
                 async with aiohttp.ClientSession(
-                    timeout=timeout
+                    headers=headers
                 ) as session:
 
-                    for current_endpoint in endpoints:
+                    async with session.get(
+                        url,
+                        params=params,
+                        timeout=aiohttp.ClientTimeout(
+                            total=20
+                        )
+                    ) as response:
 
-                        url = (
-                            f"{API_BASE_URL}"
-                            f"{current_endpoint}"
+                        # ----------------------------------
+                        # READ RESPONSE
+                        # ----------------------------------
+
+                        response_text = await response.text()
+
+                        print(
+                            f"🔵 Apex API request: "
+                            f"{response.method} "
+                            f"{response.url}"
                         )
 
-                        try:
+                        print(
+                            f"🔵 Apex API status: "
+                            f"{response.status}"
+                        )
 
-                            async with session.get(
-                                url,
-                                params=params,
-                                headers={
-                                    "Accept": "application/json",
-                                    "User-Agent": (
-                                        "GridGuardian/1.0"
-                                    )
-                                }
-                            ) as response:
+                        # ----------------------------------
+                        # SUCCESS
+                        # ----------------------------------
 
-                                # ==================================
-                                # SUCCESS
-                                # ==================================
+                        if response.status == 200:
 
-                                if response.status == 200:
+                            try:
 
-                                    content_type = (
-                                        response.headers.get(
-                                            "Content-Type",
-                                            ""
-                                        )
-                                    )
+                                data = await response.json(
+                                    content_type=None
+                                )
 
-                                    try:
+                                return data, None
 
-                                        data = (
-                                            await response.json(
-                                                content_type=None
-                                            )
-                                        )
-
-                                        if isinstance(
-                                            data,
-                                            (dict, list)
-                                        ):
-
-                                            return data, None
-
-                                        print(
-                                            "❌ Apex API returned "
-                                            "unexpected JSON data."
-                                        )
-
-                                        return None, (
-                                            "❌ The Apex API returned "
-                                            "unexpected data."
-                                        )
-
-                                    except Exception as error:
-
-                                        body = await response.text()
-
-                                        print(
-                                            "❌ Apex API returned "
-                                            "HTTP 200 but invalid JSON."
-                                        )
-
-                                        print(
-                                            f"Content-Type: "
-                                            f"{content_type}"
-                                        )
-
-                                        print(
-                                            f"Response: "
-                                            f"{body[:1500]}"
-                                        )
-
-                                        return None, (
-                                            "❌ The Apex API returned "
-                                            "invalid data."
-                                        )
-
-                                # ==================================
-                                # 406
-                                # ==================================
-
-                                if response.status == 406:
-
-                                    body = await response.text()
-
-                                    print(
-                                        "❌ Apex API returned "
-                                        "HTTP 406."
-                                    )
-
-                                    print(
-                                        f"URL: {url}"
-                                    )
-
-                                    print(
-                                        f"Endpoint: "
-                                        f"{current_endpoint}"
-                                    )
-
-                                    print(
-                                        f"Response: "
-                                        f"{body[:2000]}"
-                                    )
-
-                                    # Try the fallback endpoint
-                                    # if one was provided.
-                                    if (
-                                        current_endpoint
-                                        != endpoints[-1]
-                                    ):
-
-                                        print(
-                                            "⚠️ Trying Apex API "
-                                            "fallback endpoint..."
-                                        )
-
-                                        continue
-
-                                    return None, (
-                                        "❌ The Apex API returned "
-                                        "HTTP 406 (Not Acceptable)."
-                                    )
-
-                                # ==================================
-                                # 400
-                                # ==================================
-
-                                if response.status == 400:
-
-                                    return None, (
-                                        "⚠️ The Apex API asked "
-                                        "you to try again in a "
-                                        "few minutes."
-                                    )
-
-                                # ==================================
-                                # 403
-                                # ==================================
-
-                                if response.status == 403:
-
-                                    return None, (
-                                        "❌ The Apex API key was "
-                                        "rejected.\n\n"
-                                        "Check the `APEX_API_KEY` "
-                                        "variable in Railway."
-                                    )
-
-                                # ==================================
-                                # 404
-                                # ==================================
-
-                                if response.status == 404:
-
-                                    return None, (
-                                        "❌ The requested Apex "
-                                        "API resource could not "
-                                        "be found."
-                                    )
-
-                                # ==================================
-                                # 405
-                                # ==================================
-
-                                if response.status == 405:
-
-                                    return None, (
-                                        "❌ The Apex API reported "
-                                        "an external API error "
-                                        "(HTTP 405)."
-                                    )
-
-                                # ==================================
-                                # 410
-                                # ==================================
-
-                                if response.status == 410:
-
-                                    return None, (
-                                        "❌ That Apex platform "
-                                        "isn't supported."
-                                    )
-
-                                # ==================================
-                                # 429
-                                # ==================================
-
-                                if response.status == 429:
-
-                                    return None, (
-                                        "⚠️ The Apex API rate "
-                                        "limit was reached. "
-                                        "Please wait a moment."
-                                    )
-
-                                # ==================================
-                                # 500
-                                # ==================================
-
-                                if response.status == 500:
-
-                                    return None, (
-                                        "❌ The Apex API is "
-                                        "currently experiencing "
-                                        "an internal error."
-                                    )
-
-                                # ==================================
-                                # OTHER ERROR
-                                # ==================================
-
-                                body = await response.text()
+                            except Exception as error:
 
                                 print(
-                                    f"❌ Apex API HTTP "
-                                    f"{response.status}"
+                                    "❌ Apex API returned "
+                                    "HTTP 200 but the "
+                                    "response was not valid JSON."
                                 )
 
                                 print(
-                                    f"URL: {url}"
+                                    f"Response content: "
+                                    f"{response_text[:2000]}"
                                 )
 
                                 print(
-                                    f"Response: "
-                                    f"{body[:1000]}"
+                                    f"JSON error: {error}"
                                 )
 
                                 return None, (
-                                    f"❌ Apex API returned "
-                                    f"HTTP {response.status}."
+                                    "❌ The Apex API returned "
+                                    "invalid data."
                                 )
 
-                        except asyncio.TimeoutError:
+                        # ----------------------------------
+                        # 400
+                        # ----------------------------------
+
+                        if response.status == 400:
 
                             print(
-                                f"⚠️ Apex API timeout: "
-                                f"{current_endpoint}"
+                                f"❌ Apex API returned HTTP 400."
+                            )
+
+                            print(
+                                f"Response: "
+                                f"{response_text[:2000]}"
                             )
 
                             return None, (
-                                "⚠️ The Apex API took too "
-                                "long to respond."
+                                "⚠️ The Apex API asked you "
+                                "to try again in a few minutes."
                             )
+
+                        # ----------------------------------
+                        # 403
+                        # ----------------------------------
+
+                        if response.status == 403:
+
+                            print(
+                                "❌ Apex API returned HTTP 403."
+                            )
+
+                            print(
+                                f"Response: "
+                                f"{response_text[:2000]}"
+                            )
+
+                            return None, (
+                                "❌ The Apex API key was "
+                                "rejected. Check your "
+                                "`APEX_API_KEY`."
+                            )
+
+                        # ----------------------------------
+                        # 404
+                        # ----------------------------------
+
+                        if response.status == 404:
+
+                            print(
+                                "❌ Apex API returned HTTP 404."
+                            )
+
+                            print(
+                                f"URL: {response.url}"
+                            )
+
+                            print(
+                                f"Response: "
+                                f"{response_text[:2000]}"
+                            )
+
+                            return None, (
+                                "❌ That Apex player or "
+                                "endpoint could not be found."
+                            )
+
+                        # ----------------------------------
+                        # 405
+                        # ----------------------------------
+
+                        if response.status == 405:
+
+                            print(
+                                "❌ Apex API returned HTTP 405."
+                            )
+
+                            print(
+                                f"Response: "
+                                f"{response_text[:2000]}"
+                            )
+
+                            return None, (
+                                "❌ The Apex API rejected "
+                                "this request method."
+                            )
+
+                        # ----------------------------------
+                        # 406
+                        # ----------------------------------
+
+                        if response.status == 406:
+
+                            print(
+                                "❌ Apex API returned "
+                                "HTTP 406."
+                            )
+
+                            print(
+                                f"URL: {response.url}"
+                            )
+
+                            print(
+                                f"Endpoint: {endpoint}"
+                            )
+
+                            print(
+                                "Response:"
+                            )
+
+                            print(
+                                response_text[:4000]
+                            )
+
+                            return None, (
+                                "❌ The Apex API returned "
+                                "HTTP 406 (Not Acceptable)."
+                            )
+
+                        # ----------------------------------
+                        # 410
+                        # ----------------------------------
+
+                        if response.status == 410:
+
+                            print(
+                                "❌ Apex API returned HTTP 410."
+                            )
+
+                            print(
+                                f"Response: "
+                                f"{response_text[:2000]}"
+                            )
+
+                            return None, (
+                                "❌ That platform isn't "
+                                "supported."
+                            )
+
+                        # ----------------------------------
+                        # 429
+                        # ----------------------------------
+
+                        if response.status == 429:
+
+                            print(
+                                "⚠️ Apex API rate limit reached."
+                            )
+
+                            print(
+                                f"Response: "
+                                f"{response_text[:2000]}"
+                            )
+
+                            return None, (
+                                "⚠️ The Apex API rate limit "
+                                "was reached. Please wait "
+                                "a moment and try again."
+                            )
+
+                        # ----------------------------------
+                        # OTHER ERROR
+                        # ----------------------------------
+
+                        print(
+                            f"❌ Apex API returned HTTP "
+                            f"{response.status}."
+                        )
+
+                        print(
+                            f"URL: {response.url}"
+                        )
+
+                        print(
+                            f"Response: "
+                            f"{response_text[:4000]}"
+                        )
+
+                        return None, (
+                            f"❌ Apex API error: "
+                            f"HTTP {response.status}"
+                        )
+
+        # ==================================================
+        # TIMEOUT
+        # ==================================================
+
+        except asyncio.TimeoutError:
+
+            print(
+                "⚠️ Apex API request timed out."
+            )
+
+            return None, (
+                "⚠️ The Apex API took too long "
+                "to respond."
+            )
+
+        # ==================================================
+        # CONNECTION ERROR
+        # ==================================================
 
         except aiohttp.ClientError as error:
 
@@ -463,8 +511,13 @@ class Apex(commands.Cog):
             )
 
             return None, (
-                "❌ Couldn't connect to the Apex API."
+                "❌ Couldn't connect to "
+                "the Apex API."
             )
+
+        # ==================================================
+        # UNEXPECTED ERROR
+        # ==================================================
 
         except Exception as error:
 
@@ -480,7 +533,7 @@ class Apex(commands.Cog):
 
 
     # ======================================================
-    # PLAYER STATS
+    # LIVE PLAYER STATS
     # ======================================================
 
     @commands.command(
@@ -523,7 +576,9 @@ class Apex(commands.Cog):
 
         if error:
 
-            return await ctx.send(error)
+            return await ctx.send(
+                error
+            )
 
         if not isinstance(
             data,
@@ -531,7 +586,8 @@ class Apex(commands.Cog):
         ):
 
             return await ctx.send(
-                "❌ The Apex API returned unexpected data."
+                "❌ The Apex API returned "
+                "unexpected data."
             )
 
         global_data = data.get(
@@ -604,7 +660,8 @@ class Apex(commands.Cog):
         embed = discord.Embed(
             title="🎮 Apex Legends Player Stats",
             description=(
-                f"Statistics for **{player_name}**"
+                f"Statistics for "
+                f"**{player_name}**"
             ),
             color=EMBED_COLOR
         )
@@ -617,13 +674,17 @@ class Apex(commands.Cog):
 
         embed.add_field(
             name="🖥️ Platform",
-            value=str(platform_name),
+            value=str(
+                platform_name
+            ),
             inline=True
         )
 
         embed.add_field(
             name="⭐ Level",
-            value=format_number(level),
+            value=format_number(
+                level
+            ),
             inline=True
         )
 
@@ -635,30 +696,41 @@ class Apex(commands.Cog):
 
         embed.add_field(
             name="📈 RP",
-            value=format_number(rank_score),
+            value=format_number(
+                rank_score
+            ),
             inline=True
         )
 
         embed.add_field(
             name="💀 Kills",
-            value=format_number(kills),
+            value=format_number(
+                kills
+            ),
             inline=True
         )
 
         embed.add_field(
             name="🏅 Wins",
-            value=format_number(wins),
+            value=format_number(
+                wins
+            ),
             inline=True
         )
 
         embed.add_field(
             name="💥 Damage",
-            value=format_number(damage),
+            value=format_number(
+                damage
+            ),
             inline=True
         )
 
         embed.set_footer(
-            text="Data provided by Apex Legends Status"
+            text=(
+                "Data provided by "
+                "Apex Legends Status"
+            )
         )
 
         await ctx.send(
@@ -674,128 +746,115 @@ class Apex(commands.Cog):
         name="apexmap",
         aliases=[
             "maprotation",
-            "maps",
-            "map"
+            "maps"
         ]
     )
-    async def apexmap(self, ctx):
+    async def apexmap(
+        self,
+        ctx
+    ):
 
         async with ctx.typing():
 
-            # The .php endpoint is included because the
-            # server shown in your Railway logs is currently
-            # advertising it as an available variant.
             data, error = await self.api_request(
-                "/maprotation.php",
+                "/maprotation",
                 {
                     "version": 2
-                },
-                fallback_endpoint="/maprotation"
+                }
             )
 
         if error:
 
-            return await ctx.send(error)
-
-        if not isinstance(
-            data,
-            dict
-        ):
-
             return await ctx.send(
-                "❌ The Apex API returned unexpected "
-                "map rotation data."
+                error
             )
 
         embed = discord.Embed(
             title="🗺️ Apex Legends Map Rotation",
             description=(
-                "Current and upcoming Apex Legends maps."
+                "Current and upcoming "
+                "Apex Legends maps."
             ),
             color=EMBED_COLOR
         )
 
-        displayed = 0
+        if isinstance(
+            data,
+            dict
+        ):
 
-        # ==================================================
-        # MAP DATA
-        # ==================================================
+            displayed = 0
 
-        for mode_name, mode_data in data.items():
+            for mode_name, mode_data in data.items():
 
-            if not isinstance(
-                mode_data,
-                dict
-            ):
-                continue
+                if not isinstance(
+                    mode_data,
+                    dict
+                ):
+                    continue
 
-            current = mode_data.get(
-                "current",
-                {}
-            )
+                current = mode_data.get(
+                    "current",
+                    {}
+                )
 
-            next_map = mode_data.get(
-                "next",
-                {}
-            )
+                next_map = mode_data.get(
+                    "next",
+                    {}
+                )
 
-            if not isinstance(
-                current,
-                dict
-            ):
-                current = {}
+                current_map = (
+                    current.get(
+                        "map",
+                        "Unknown"
+                    )
+                    if isinstance(
+                        current,
+                        dict
+                    )
+                    else "Unknown"
+                )
 
-            if not isinstance(
-                next_map,
-                dict
-            ):
-                next_map = {}
+                next_map_name = (
+                    next_map.get(
+                        "map",
+                        "Unknown"
+                    )
+                    if isinstance(
+                        next_map,
+                        dict
+                    )
+                    else "Unknown"
+                )
 
-            current_map = current.get(
-                "map"
-            )
+                if (
+                    current_map == "Unknown"
+                    and
+                    next_map_name == "Unknown"
+                ):
+                    continue
 
-            next_map_name = next_map.get(
-                "map"
-            )
+                embed.add_field(
+                    name=mode_name.replace(
+                        "_",
+                        " "
+                    ).title(),
+                    value=(
+                        f"**Now:** {current_map}\n"
+                        f"**Next:** {next_map_name}"
+                    ),
+                    inline=False
+                )
 
-            if not current_map:
+                displayed += 1
 
-                current_map = "Unknown"
+            if displayed == 0:
 
-            if not next_map_name:
-
-                next_map_name = "Unknown"
-
-            if (
-                current_map == "Unknown"
-                and next_map_name == "Unknown"
-            ):
-                continue
-
-            clean_name = (
-                mode_name
-                .replace("_", " ")
-                .title()
-            )
-
-            embed.add_field(
-                name=clean_name,
-                value=(
-                    f"**Now:** {current_map}\n"
-                    f"**Next:** {next_map_name}"
-                ),
-                inline=False
-            )
-
-            displayed += 1
-
-        if displayed == 0:
-
-            embed.description = (
-                "⚠️ The API responded, but no map "
-                "rotation information was returned."
-            )
+                embed.description = (
+                    "The API did not return "
+                    "map rotation information "
+                    "right now."
+                )
 
         embed.set_footer(
             text=(
@@ -820,7 +879,10 @@ class Apex(commands.Cog):
             "predatorrp"
         ]
     )
-    async def predator(self, ctx):
+    async def predator(
+        self,
+        ctx
+    ):
 
         async with ctx.typing():
 
@@ -830,104 +892,102 @@ class Apex(commands.Cog):
 
         if error:
 
-            return await ctx.send(error)
-
-        if not isinstance(
-            data,
-            dict
-        ):
-
             return await ctx.send(
-                "❌ The Apex API returned unexpected data."
+                error
             )
 
         embed = discord.Embed(
             title="👑 Apex Predator Thresholds",
             description=(
-                "Current RP/AP requirements for "
-                "Apex Predator."
+                "Current RP/AP requirements "
+                "for Apex Predator."
             ),
             color=EMBED_COLOR
         )
 
-        rp_data = data.get(
-            "RP",
-            {}
-        )
-
-        if not isinstance(
-            rp_data,
+        if isinstance(
+            data,
             dict
         ):
 
-            rp_data = {}
-
-        platforms = {
-
-            "PC": rp_data.get(
-                "PC"
-            ),
-
-            "PlayStation": rp_data.get(
-                "PS4"
-            ),
-
-            "Xbox": rp_data.get(
-                "X1"
-            ),
-
-            "Switch": rp_data.get(
-                "SWITCH"
+            rp_data = data.get(
+                "RP",
+                {}
             )
-        }
-
-        added = False
-
-        for name, platform_data in platforms.items():
 
             if not isinstance(
-                platform_data,
+                rp_data,
                 dict
             ):
-                continue
+                rp_data = {}
 
-            value = platform_data.get(
-                "val"
-            )
+            platforms = {
 
-            total_masters = platform_data.get(
-                "totalMasters"
-            )
+                "PC": rp_data.get(
+                    "PC"
+                ),
 
-            if value is None:
-                continue
+                "PlayStation": rp_data.get(
+                    "PS4"
+                ),
 
-            text = (
-                f"**Required RP:** "
-                f"{format_number(value)}"
-            )
+                "Xbox": rp_data.get(
+                    "X1"
+                ),
 
-            if total_masters is not None:
+                "Switch": rp_data.get(
+                    "SWITCH"
+                )
+            }
 
-                text += (
-                    f"\n**Masters:** "
-                    f"{format_number(total_masters)}"
+            added = False
+
+            for name, platform_data in platforms.items():
+
+                if not isinstance(
+                    platform_data,
+                    dict
+                ):
+                    continue
+
+                value = platform_data.get(
+                    "val"
                 )
 
-            embed.add_field(
-                name=name,
-                value=text,
-                inline=True
-            )
+                total_masters = platform_data.get(
+                    "totalMasters"
+                )
 
-            added = True
+                if value is None:
+                    continue
 
-        if not added:
+                text = (
+                    f"**Required RP:** "
+                    f"{format_number(value)}"
+                )
 
-            embed.description = (
-                "⚠️ The API returned Predator data "
-                "in an unexpected format."
-            )
+                if total_masters is not None:
+
+                    text += (
+                        f"\n**Masters:** "
+                        f"{format_number(total_masters)}"
+                    )
+
+                embed.add_field(
+                    name=name,
+                    value=text,
+                    inline=True
+                )
+
+                added = True
+
+            if not added:
+
+                embed.description = (
+                    "The API returned data, "
+                    "but its Predator structure "
+                    "was different than expected."
+                )
 
         embed.set_footer(
             text=(
@@ -942,7 +1002,7 @@ class Apex(commands.Cog):
 
 
     # ======================================================
-    # SERVER STATUS
+    # APEX SERVER STATUS
     # ======================================================
 
     @commands.command(
@@ -952,55 +1012,76 @@ class Apex(commands.Cog):
             "serverstatus"
         ]
     )
-    async def apexservers(self, ctx):
+    async def apexservers(
+        self,
+        ctx
+    ):
 
         async with ctx.typing():
 
             data, error = await self.api_request(
-                "/servers"
+                "/servers",
+                {}
             )
 
         if error:
 
-            return await ctx.send(error)
+            return await ctx.send(
+                error
+            )
 
         if not isinstance(
             data,
             dict
         ):
 
+            print(
+                "❌ Server endpoint returned "
+                "non-dictionary data:"
+            )
+
+            print(
+                str(data)[:4000]
+            )
+
             return await ctx.send(
-                "❌ The Apex API returned unexpected "
-                "server status data."
+                "❌ The Apex server-status API "
+                "returned unexpected data."
             )
 
         embed = discord.Embed(
             title="🟢 Apex Legends Server Status",
             description=(
-                "Current Apex Legends service status."
+                "Current Apex Legends "
+                "service status."
             ),
             color=EMBED_COLOR
         )
 
-        count = 0
+        # --------------------------------------------------
+        # THE SERVER ENDPOINT CAN HAVE DIFFERENT STRUCTURES.
+        # Instead of assuming every service has the exact
+        # same format, inspect the returned dictionaries.
+        # --------------------------------------------------
 
-        # ==================================================
-        # SERVER SERVICES
-        # ==================================================
+        displayed = 0
 
         for name, value in data.items():
 
-            if count >= 12:
-
+            if displayed >= 12:
                 break
 
-            display_name = (
-                name
-                .replace("_", " ")
-                .title()
-            )
+            # Skip metadata that isn't a service.
+            if name in (
+                "timestamp",
+                "updated",
+                "lastUpdated"
+            ):
+                continue
 
-            status = value
+            # ----------------------------------------------
+            # DICTIONARY SERVICE
+            # ----------------------------------------------
 
             if isinstance(
                 value,
@@ -1017,40 +1098,89 @@ class Apex(commands.Cog):
                     or value.get(
                         "statusText"
                     )
-                    or "Unknown"
+                    or value.get(
+                        "state"
+                    )
+                    or value.get(
+                        "value"
+                    )
                 )
 
-            if isinstance(
-                status,
-                dict
-            ):
+                if isinstance(
+                    status,
+                    dict
+                ):
 
-                status = str(
-                    status
+                    status = (
+                        status.get(
+                            "Status"
+                        )
+                        or status.get(
+                            "status"
+                        )
+                        or str(status)
+                    )
+
+                if status is None:
+
+                    status = "Unknown"
+
+                embed.add_field(
+                    name=name.replace(
+                        "_",
+                        " "
+                    ).title(),
+                    value=str(
+                        status
+                    )[:1000],
+                    inline=True
                 )
 
-            status_text = str(
-                status
-            )[:500]
+                displayed += 1
 
-            embed.add_field(
-                name=display_name,
-                value=status_text,
-                inline=True
+                continue
+
+            # ----------------------------------------------
+            # SIMPLE VALUE
+            # ----------------------------------------------
+
+            if value is not None:
+
+                embed.add_field(
+                    name=name.replace(
+                        "_",
+                        " "
+                    ).title(),
+                    value=str(
+                        value
+                    )[:1000],
+                    inline=True
+                )
+
+                displayed += 1
+
+        if displayed == 0:
+
+            # We don't want to silently show a blank embed.
+            embed.description = (
+                "The API responded, but no "
+                "server-status categories "
+                "were returned."
             )
 
-            count += 1
+            print(
+                "⚠️ /servers returned no "
+                "displayable categories."
+            )
 
-        if count == 0:
-
-            embed.description = (
-                "⚠️ The API responded, but no "
-                "server status information was found."
+            print(
+                str(data)[:4000]
             )
 
         embed.set_footer(
             text=(
-                "Data from apexlegendsstatus.com"
+                "Data from "
+                "apexlegendsstatus.com"
             )
         )
 
@@ -1060,7 +1190,7 @@ class Apex(commands.Cog):
 
 
     # ======================================================
-    # PLAYER UID
+    # PLAYER UID LOOKUP
     # ======================================================
 
     @commands.command(
@@ -1100,22 +1230,22 @@ class Apex(commands.Cog):
 
         if error:
 
-            return await ctx.send(error)
+            return await ctx.send(
+                error
+            )
 
-        if not isinstance(
+        uid = None
+
+        if isinstance(
             data,
             dict
         ):
 
-            return await ctx.send(
-                "❌ The Apex API returned unexpected data."
+            uid = (
+                data.get("uid")
+                or data.get("UID")
+                or data.get("id")
             )
-
-        uid = (
-            data.get("uid")
-            or data.get("UID")
-            or data.get("id")
-        )
 
         embed = discord.Embed(
             title="🆔 Apex Player UID",
@@ -1163,10 +1293,16 @@ class Apex(commands.Cog):
     @commands.command(
         name="apexhelp"
     )
-    async def apexhelp(self, ctx):
+    async def apexhelp(
+        self,
+        ctx
+    ):
 
         embed = discord.Embed(
-            title="🎮 Grid Guardian — Apex Commands",
+            title=(
+                "🎮 Grid Guardian — "
+                "Live Apex Commands"
+            ),
             description=(
                 "Commands powered by live "
                 "Apex Legends data."
@@ -1185,14 +1321,12 @@ class Apex(commands.Cog):
         )
 
         embed.add_field(
-            name="🗺️ Map Rotation",
+            name="🗺️ Live Maps",
             value=(
-                "`!maps`\n"
                 "`!apexmap`\n"
-                "`!maprotation`\n"
-                "`!map`"
+                "`!maps`"
             ),
-            inline=False
+            inline=True
         )
 
         embed.add_field(
@@ -1239,8 +1373,4 @@ async def setup(bot):
 
     await bot.add_cog(
         Apex(bot)
-    )
-
-    print(
-        "✅ Apex cog loaded"
     )
