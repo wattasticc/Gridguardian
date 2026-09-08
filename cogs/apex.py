@@ -71,7 +71,6 @@ def find_stat(data, stat_name):
 
     stat_name = stat_name.lower()
 
-    # Check global trackers.
     global_data = data.get("global", {})
 
     rank_data = global_data.get("rank", {})
@@ -79,7 +78,6 @@ def find_stat(data, stat_name):
     if stat_name in rank_data:
         return rank_data.get(stat_name)
 
-    # Check legends.
     legends = data.get("legends", {})
 
     all_legends = legends.get("all", {})
@@ -124,7 +122,6 @@ class Apex(commands.Cog):
 
         self.bot = bot
 
-        # Prevent requests from happening too quickly.
         self.request_lock = asyncio.Lock()
 
 
@@ -147,13 +144,16 @@ class Apex(commands.Cog):
 
         url = f"{API_BASE_URL}{endpoint}"
 
-        headers = {
-            "Authorization": APEX_API_KEY,
-            "Accept": "application/json"
-        }
-
         if params is None:
             params = {}
+
+        # Apex Legends Status officially supports
+        # authentication through the "auth" GET parameter.
+        params["auth"] = APEX_API_KEY
+
+        headers = {
+            "Accept": "application/json"
+        }
 
         try:
 
@@ -170,10 +170,6 @@ class Apex(commands.Cog):
                         )
                     ) as response:
 
-                        # =================================
-                        # SUCCESS
-                        # =================================
-
                         if response.status == 200:
 
                             try:
@@ -187,6 +183,11 @@ class Apex(commands.Cog):
                                     dict
                                 ):
 
+                                    print(
+                                        "❌ Apex API returned "
+                                        "non-dictionary data."
+                                    )
+
                                     return None, (
                                         "❌ The Apex API returned "
                                         "an unexpected response."
@@ -197,8 +198,7 @@ class Apex(commands.Cog):
                             except Exception as error:
 
                                 print(
-                                    f"❌ Apex API JSON error: "
-                                    f"{error}"
+                                    f"❌ Apex API JSON error: {error}"
                                 )
 
                                 raw_response = (
@@ -206,7 +206,7 @@ class Apex(commands.Cog):
                                 )
 
                                 print(
-                                    "❌ Apex API response:"
+                                    "❌ Apex API raw response:"
                                 )
 
                                 print(
@@ -217,10 +217,6 @@ class Apex(commands.Cog):
                                     "❌ The Apex API returned "
                                     "invalid data."
                                 )
-
-                        # =================================
-                        # ERROR CODES
-                        # =================================
 
                         if response.status == 400:
 
@@ -239,8 +235,8 @@ class Apex(commands.Cog):
                         if response.status == 404:
 
                             return None, (
-                                "❌ That Apex player could not "
-                                "be found."
+                                "❌ That player or API endpoint "
+                                "could not be found."
                             )
 
                         if response.status == 410:
@@ -253,8 +249,14 @@ class Apex(commands.Cog):
 
                             return None, (
                                 "⚠️ The Apex API rate limit was "
-                                "reached. Please wait a moment "
-                                "and try again."
+                                "reached. Please wait a moment."
+                            )
+
+                        if response.status == 406:
+
+                            return None, (
+                                "❌ The Apex API returned HTTP 406 "
+                                "(Not Acceptable)."
                             )
 
                         return None, (
@@ -674,7 +676,6 @@ class Apex(commands.Cog):
 
             if not added:
 
-                # Fallback if API structure changes.
                 embed.description = (
                     "```"
                     + str(data)[:3500]
@@ -713,6 +714,13 @@ class Apex(commands.Cog):
 
             return await ctx.send(error)
 
+        if not isinstance(data, dict):
+
+            return await ctx.send(
+                "❌ The Apex API returned an unexpected "
+                "server status response."
+            )
+
         embed = discord.Embed(
             title="🟢 Apex Legends Server Status",
             description=(
@@ -721,23 +729,15 @@ class Apex(commands.Cog):
             color=EMBED_COLOR
         )
 
-        if not isinstance(data, dict):
-
-            return await ctx.send(
-                "❌ The Apex API returned an unexpected "
-                "server status response."
-            )
-
-        # ==================================================
-        # SERVER STATUS DATA
-        # ==================================================
-
         services = data.get(
             "Origin_login",
             {}
         )
 
-        if isinstance(services, dict) and services:
+        if isinstance(
+            services,
+            dict
+        ) and services:
 
             status = (
                 services.get("Status")
@@ -759,10 +759,6 @@ class Apex(commands.Cog):
                 value=str(status)[:500],
                 inline=False
             )
-
-        # ==================================================
-        # OTHER SERVICES
-        # ==================================================
 
         count = 0
 
@@ -802,10 +798,6 @@ class Apex(commands.Cog):
                 )
 
                 count += 1
-
-        # ==================================================
-        # FALLBACK
-        # ==================================================
 
         if len(embed.fields) == 0:
 
@@ -947,33 +939,25 @@ class Apex(commands.Cog):
 
         embed.add_field(
             name="🗺️ Live Maps",
-            value=(
-                "`!apexmap`"
-            ),
+            value="`!apexmap`",
             inline=True
         )
 
         embed.add_field(
             name="👑 Predator RP",
-            value=(
-                "`!predator`"
-            ),
+            value="`!predator`",
             inline=True
         )
 
         embed.add_field(
             name="🟢 Server Status",
-            value=(
-                "`!apexservers`"
-            ),
+            value="`!apexservers`",
             inline=True
         )
 
         embed.add_field(
             name="🆔 Player UID",
-            value=(
-                "`!apexuid PC PlayerName`"
-            ),
+            value="`!apexuid PC PlayerName`",
             inline=False
         )
 
@@ -981,9 +965,7 @@ class Apex(commands.Cog):
             text="Grid Guardian • Live Apex Legends System"
         )
 
-        await ctx.send(
-            embed=embed
-        )
+        await ctx.send(embed=embed)
 
 
 # ==========================================================
