@@ -1,7 +1,7 @@
 import asyncio
 import re
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone
 from html import unescape
 from urllib.parse import urljoin
 
@@ -10,9 +10,9 @@ import discord
 from discord.ext import commands, tasks
 
 
-# =========================================================
+# ==========================================================
 # CONFIGURATION
-# =========================================================
+# ==========================================================
 
 EA_NEWS_URL = (
     "https://www.ea.com/games/apex-legends/"
@@ -33,9 +33,9 @@ USER_AGENT = (
 )
 
 
-# =========================================================
+# ==========================================================
 # DATABASE
-# =========================================================
+# ==========================================================
 
 db = sqlite3.connect(
     "gridguardian.db",
@@ -49,7 +49,6 @@ db.execute("PRAGMA synchronous = NORMAL")
 
 cursor = db.cursor()
 
-
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS apex_news_settings (
     guild_id INTEGER PRIMARY KEY,
@@ -62,9 +61,9 @@ CREATE TABLE IF NOT EXISTS apex_news_settings (
 db.commit()
 
 
-# =========================================================
+# ==========================================================
 # HELPERS
-# =========================================================
+# ==========================================================
 
 def clean_text(text: str) -> str:
     """Clean HTML entities and excess whitespace."""
@@ -92,28 +91,15 @@ def clean_text(text: str) -> str:
 def extract_latest_article(html: str):
     """
     Extract the newest Apex Legends article from
-    the official EA news page.
-
-    Returns:
-        {
-            "title": str,
-            "url": str,
-            "category": str,
-            "date": str
-        }
-
-    or None if nothing useful was found.
+    the official EA Apex Legends news page.
     """
 
     if not html:
         return None
 
-    # -----------------------------------------------------
+    # ------------------------------------------------------
     # Find Apex article URLs.
-    #
-    # EA's page contains links in the form:
-    # /games/apex-legends/apex-legends/news/ARTICLE
-    # -----------------------------------------------------
+    # ------------------------------------------------------
 
     pattern = re.compile(
         r'href=["\']'
@@ -128,10 +114,14 @@ def extract_latest_article(html: str):
     if not matches:
         return None
 
+    # ------------------------------------------------------
     # Remove duplicates while preserving order.
+    # ------------------------------------------------------
+
     article_urls = []
 
     for url in matches:
+
         full_url = urljoin(
             EA_NEWS_URL,
             unescape(url)
@@ -143,24 +133,19 @@ def extract_latest_article(html: str):
     if not article_urls:
         return None
 
-    # -----------------------------------------------------
-    # The EA page is ordered newest first.
-    # -----------------------------------------------------
-
+    # EA normally places newest articles first.
     latest_url = article_urls[0]
 
-    # -----------------------------------------------------
-    # Try to locate the title associated with the article.
-    #
-    # We search around the first occurrence of the URL.
-    # -----------------------------------------------------
+    # ------------------------------------------------------
+    # Locate the article in the HTML.
+    # ------------------------------------------------------
 
-    url_index = html.find(
-        latest_url.replace(
-            "https://www.ea.com",
-            ""
-        )
+    relative_url = latest_url.replace(
+        "https://www.ea.com",
+        ""
     )
+
+    url_index = html.find(relative_url)
 
     if url_index == -1:
         url_index = html.find(latest_url)
@@ -168,14 +153,15 @@ def extract_latest_article(html: str):
     surrounding = ""
 
     if url_index != -1:
+
         surrounding = html[
-            max(0, url_index - 2500):
-            min(len(html), url_index + 2500)
+            max(0, url_index - 3000):
+            min(len(html), url_index + 3000)
         ]
 
-    # -----------------------------------------------------
-    # Extract visible text around the article.
-    # -----------------------------------------------------
+    # ------------------------------------------------------
+    # Extract visible text around article.
+    # ------------------------------------------------------
 
     text_candidates = []
 
@@ -183,14 +169,15 @@ def extract_latest_article(html: str):
         r">([^<>]{5,300})<",
         surrounding
     ):
+
         cleaned = clean_text(match)
 
         if cleaned:
             text_candidates.append(cleaned)
 
-    # -----------------------------------------------------
+    # ------------------------------------------------------
     # Remove obvious navigation/UI text.
-    # -----------------------------------------------------
+    # ------------------------------------------------------
 
     ignored = {
         "read more",
@@ -209,15 +196,14 @@ def extract_latest_article(html: str):
         if text.lower() not in ignored
     ]
 
-    title = (
-        useful_candidates[-1]
-        if useful_candidates
-        else "Latest Apex Legends News"
-    )
+    if useful_candidates:
+        title = useful_candidates[-1]
+    else:
+        title = "Latest Apex Legends News"
 
-    # -----------------------------------------------------
-    # Try to find a date.
-    # -----------------------------------------------------
+    # ------------------------------------------------------
+    # Find date.
+    # ------------------------------------------------------
 
     date_match = re.search(
         r"\b("
@@ -235,9 +221,9 @@ def extract_latest_article(html: str):
         else "Latest"
     )
 
-    # -----------------------------------------------------
-    # Try to determine the article category.
-    # -----------------------------------------------------
+    # ------------------------------------------------------
+    # Determine category.
+    # ------------------------------------------------------
 
     category = "News"
 
@@ -245,6 +231,7 @@ def extract_latest_article(html: str):
 
     if "game updates" in lower_surrounding:
         category = "Game Update"
+
     elif "guides" in lower_surrounding:
         category = "Guide"
 
@@ -265,10 +252,14 @@ async def fetch_latest_article():
 
     headers = {
         "User-Agent": USER_AGENT,
-        "Accept": "text/html,application/xhtml+xml"
+        "Accept": (
+            "text/html,"
+            "application/xhtml+xml"
+        ),
     }
 
     try:
+
         async with aiohttp.ClientSession(
             timeout=timeout,
             headers=headers
@@ -279,6 +270,7 @@ async def fetch_latest_article():
             ) as response:
 
                 if response.status != 200:
+
                     print(
                         "❌ Apex News HTTP error: "
                         f"{response.status}"
@@ -295,17 +287,20 @@ async def fetch_latest_article():
                 )
 
     except asyncio.TimeoutError:
+
         print(
             "❌ Apex News request timed out."
         )
 
     except aiohttp.ClientError as error:
+
         print(
             "❌ Apex News request failed: "
             f"{error}"
         )
 
     except Exception as error:
+
         print(
             "❌ Unexpected Apex News error: "
             f"{error}"
@@ -314,11 +309,12 @@ async def fetch_latest_article():
     return None
 
 
-# =========================================================
+# ==========================================================
 # DATABASE HELPERS
-# =========================================================
+# ==========================================================
 
 def get_settings(guild_id: int):
+
     cursor.execute("""
     SELECT
         channel_id,
@@ -347,7 +343,10 @@ def save_settings(
     channel_id: int,
     last_article_url: str | None
 ):
-    timestamp = datetime.utcnow().isoformat()
+
+    timestamp = datetime.now(
+        timezone.utc
+    ).isoformat()
 
     cursor.execute("""
     INSERT INTO apex_news_settings (
@@ -357,6 +356,7 @@ def save_settings(
         updated_at
     )
     VALUES (?, ?, ?, ?)
+
     ON CONFLICT(guild_id)
     DO UPDATE SET
         channel_id=excluded.channel_id,
@@ -376,6 +376,11 @@ def update_last_article(
     guild_id: int,
     article_url: str
 ):
+
+    timestamp = datetime.now(
+        timezone.utc
+    ).isoformat()
+
     cursor.execute("""
     UPDATE apex_news_settings
     SET
@@ -384,18 +389,19 @@ def update_last_article(
     WHERE guild_id=?
     """, (
         article_url,
-        datetime.utcnow().isoformat(),
+        timestamp,
         guild_id
     ))
 
     db.commit()
 
 
-# =========================================================
+# ==========================================================
 # EMBED
-# =========================================================
+# ==========================================================
 
 def create_news_embed(article):
+
     embed = discord.Embed(
         title="📰 Apex Legends News",
         description=(
@@ -420,35 +426,40 @@ def create_news_embed(article):
     )
 
     embed.set_footer(
-        text="Grid Guardian • Official EA Apex Legends News"
+        text=(
+            "Grid Guardian • "
+            "Official EA Apex Legends News"
+        )
     )
 
     return embed
 
 
-# =========================================================
+# ==========================================================
 # APEX NEWS COG
-# =========================================================
+# ==========================================================
 
 class ApexNews(commands.Cog):
 
     def __init__(self, bot):
+
         self.bot = bot
 
         self.check_lock = asyncio.Lock()
 
         self.apex_news_loop.start()
 
-    # =====================================================
+    # ======================================================
     # COG UNLOAD
-    # =====================================================
+    # ======================================================
 
     def cog_unload(self):
+
         self.apex_news_loop.cancel()
 
-    # =====================================================
-    # CHECK NEWS
-    # =====================================================
+    # ======================================================
+    # NEWS CHECK LOOP
+    # ======================================================
 
     @tasks.loop(
         minutes=CHECK_INTERVAL_MINUTES
@@ -496,10 +507,8 @@ class ApexNews(commands.Cog):
                 ):
                     continue
 
-                # -------------------------------------------------
                 # First setup:
-                # remember the current article without announcing it
-                # -------------------------------------------------
+                # remember current article without posting it.
 
                 if last_article_url is None:
 
@@ -510,9 +519,7 @@ class ApexNews(commands.Cog):
 
                     continue
 
-                # -------------------------------------------------
-                # Nothing new
-                # -------------------------------------------------
+                # Nothing new.
 
                 if last_article_url == article["url"]:
                     continue
@@ -533,8 +540,8 @@ class ApexNews(commands.Cog):
                     )
 
                     print(
-                        "✅ New Apex news announced in "
-                        f"{guild.name}: "
+                        "✅ New Apex news announced "
+                        f"in {guild.name}: "
                         f"{article['title']}"
                     )
 
@@ -553,25 +560,22 @@ class ApexNews(commands.Cog):
                         f"{error}"
                     )
 
-    # =====================================================
+    # ======================================================
     # LOOP READY
-    # =====================================================
+    # ======================================================
 
     @apex_news_loop.before_loop
     async def before_apex_news_loop(self):
 
         await self.bot.wait_until_ready()
 
-    # =====================================================
+    # ======================================================
     # !APEXNEWS
-    # =====================================================
+    # ======================================================
 
     @commands.command(
         name="apexnews",
-        aliases=[
-            "apexnews",
-            "apexupdates"
-        ]
+        aliases=["apexupdates"]
     )
     @commands.cooldown(
         1,
@@ -599,9 +603,9 @@ class ApexNews(commands.Cog):
             embed=embed
         )
 
-    # =====================================================
+    # ======================================================
     # !SETAPEXNEWS
-    # =====================================================
+    # ======================================================
 
     @commands.command(
         name="setapexnews"
@@ -625,13 +629,6 @@ class ApexNews(commands.Cog):
                 "Try again in a moment."
             )
 
-        # -------------------------------------------------
-        # Save the latest article immediately.
-        #
-        # This prevents the bot from posting the current
-        # article as a "new" article immediately after setup.
-        # -------------------------------------------------
-
         save_settings(
             ctx.guild.id,
             channel.id,
@@ -641,8 +638,8 @@ class ApexNews(commands.Cog):
         embed = discord.Embed(
             title="✅ Apex News Notifications Enabled",
             description=(
-                f"New official Apex Legends news will now "
-                f"be posted in {channel.mention}."
+                "New official Apex Legends news will "
+                f"now be posted in {channel.mention}."
             ),
             color=discord.Color.green()
         )
@@ -669,9 +666,9 @@ class ApexNews(commands.Cog):
             embed=embed
         )
 
-    # =====================================================
+    # ======================================================
     # !APEXNEWSSTATUS
-    # =====================================================
+    # ======================================================
 
     @commands.command(
         name="apexnewsstatus"
@@ -735,16 +732,19 @@ class ApexNews(commands.Cog):
         )
 
         embed.set_footer(
-            text="Source: Official EA Apex Legends News"
+            text=(
+                "Source: Official EA "
+                "Apex Legends News"
+            )
         )
 
         await ctx.send(
             embed=embed
         )
 
-    # =====================================================
+    # ======================================================
     # !DISABLEAPEXNEWS
-    # =====================================================
+    # ======================================================
 
     @commands.command(
         name="disableapexnews"
@@ -764,12 +764,13 @@ class ApexNews(commands.Cog):
         db.commit()
 
         await ctx.send(
-            "✅ Apex News notifications have been disabled."
+            "✅ Apex News notifications "
+            "have been disabled."
         )
 
-    # =====================================================
+    # ======================================================
     # ERROR HANDLING
-    # =====================================================
+    # ======================================================
 
     @apexnews.error
     @setapexnews.error
@@ -825,9 +826,9 @@ class ApexNews(commands.Cog):
         raise error
 
 
-# =========================================================
+# ==========================================================
 # SETUP
-# =========================================================
+# ==========================================================
 
 async def setup(bot):
 
