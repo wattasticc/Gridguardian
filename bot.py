@@ -327,6 +327,10 @@ async def load_cogs():
     await bot.load_extension("cogs.apexnews")
     print("📰 Apex News Loaded")
 
+    print("Loading Apex Map Notify...")
+    await bot.load_extension("cogs.apexmapnotify")
+    print("🗺️ Apex Map Notify Loaded")
+
     print("Loading Economy...")
     await bot.load_extension("cogs.economy")
     print("✅ Economy Loaded")
