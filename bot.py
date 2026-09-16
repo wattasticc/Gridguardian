@@ -431,6 +431,10 @@ async def load_cogs():
     await bot.load_extension("cogs.weapons")
     print("✅ Weapons Loaded")
 
+    print("Loading Loadout System...")
+    await bot.load_extension("cogs.loadout")
+    print("⚡ Loadout System Loaded")
+
     print("Loading Legends...")
     await bot.load_extension("cogs.legends")
     print("✅ Legends Loaded")
