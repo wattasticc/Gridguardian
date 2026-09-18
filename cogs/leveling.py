@@ -23,7 +23,7 @@ XP_COOLDOWN = 60
 MIN_XP_GAIN = 5
 MAX_XP_GAIN = 15
 
-# XP needed for EACH level.
+# XP required for EACH level.
 #
 # Level 1 -> Level 2 = 100 XP
 # Level 2 -> Level 3 = 100 XP
@@ -43,9 +43,6 @@ DB_PATH = "gridguardian.db"
 def get_db():
     """
     Create a fresh SQLite connection.
-
-    Using a connection per operation is safer than keeping
-    one global cursor open for the entire bot.
     """
 
     connection = sqlite3.connect(
@@ -76,9 +73,11 @@ def get_db():
 # ==========================================================
 
 def initialize_database():
+
     db = get_db()
 
     try:
+
         cursor = db.cursor()
 
         # --------------------------------------------------
@@ -109,6 +108,7 @@ def initialize_database():
         db.commit()
 
     finally:
+
         db.close()
 
 
@@ -139,16 +139,16 @@ class Leveling(commands.Cog):
     @staticmethod
     def xp_required(level: int) -> int:
         """
-        XP required to move from the current level
-        to the next level.
+        Return the XP required to move from the current
+        level to the next level.
 
         Every level requires the same amount of XP.
 
-        Example:
+        Examples:
 
         Level 1 -> Level 2 = 100 XP
         Level 2 -> Level 3 = 100 XP
-        Level 3 -> Level 4 = 100 XP
+        Level 7 -> Level 8 = 100 XP
         Level 8 -> Level 9 = 100 XP
         """
 
@@ -174,7 +174,9 @@ class Leveling(commands.Cog):
                 FROM levels
                 WHERE user_id = ?
                 """,
-                (user_id,)
+                (
+                    user_id,
+                )
             )
 
             return cursor.fetchone()
@@ -240,7 +242,7 @@ class Leveling(commands.Cog):
 
 
         # --------------------------------------------------
-        # Open database
+        # Database
         # --------------------------------------------------
 
         db = get_db()
@@ -281,11 +283,12 @@ class Leveling(commands.Cog):
                         xp,
                         level
                     )
-                    VALUES (?, ?, 1)
+                    VALUES (?, ?, ?)
                     """,
                     (
                         message.author.id,
-                        xp_gain
+                        xp_gain,
+                        1
                     )
                 )
 
@@ -303,14 +306,14 @@ class Leveling(commands.Cog):
 
 
             # --------------------------------------------------
-            # Add new XP
+            # Add XP
             # --------------------------------------------------
 
             xp += xp_gain
 
 
             # --------------------------------------------------
-            # Store original level
+            # Save original level
             # --------------------------------------------------
 
             old_level = level
@@ -327,11 +330,9 @@ class Leveling(commands.Cog):
                 required_xp = self.xp_required(level)
 
                 # ----------------------------------------------
-                # IMPORTANT:
+                # Subtract only the XP needed for this level.
                 #
-                # Only subtract the XP required for ONE level.
-                #
-                # Any extra XP stays in the account.
+                # Any remaining XP is preserved.
                 # ----------------------------------------------
 
                 xp -= required_xp
@@ -416,7 +417,7 @@ class Leveling(commands.Cog):
 
 
             # ==================================================
-            # FIND LEVEL ROLE
+            # FIND HIGHEST LEVEL ROLE
             # ==================================================
 
             final_role = None
@@ -455,7 +456,7 @@ class Leveling(commands.Cog):
                 try:
 
                     # ------------------------------------------
-                    # Remove older configured level roles.
+                    # Find lower configured level roles.
                     # ------------------------------------------
 
                     cursor.execute(
@@ -475,6 +476,7 @@ class Leveling(commands.Cog):
 
                     roles_to_remove = []
 
+
                     for row in old_role_rows:
 
                         old_role = message.guild.get_role(
@@ -486,10 +488,15 @@ class Leveling(commands.Cog):
                             and old_role in message.author.roles
                             and old_role != final_role
                         ):
+
                             roles_to_remove.append(
                                 old_role
                             )
 
+
+                    # ------------------------------------------
+                    # Remove old level roles.
+                    # ------------------------------------------
 
                     if roles_to_remove:
 
@@ -503,7 +510,7 @@ class Leveling(commands.Cog):
 
 
                     # ------------------------------------------
-                    # Add new level role.
+                    # Give new level role.
                     # ------------------------------------------
 
                     if final_role not in message.author.roles:
@@ -635,7 +642,7 @@ class Leveling(commands.Cog):
 
 
         # --------------------------------------------------
-        # Progress percentage
+        # Progress bar
         # --------------------------------------------------
 
         percent = min(
@@ -707,17 +714,17 @@ class Leveling(commands.Cog):
         role: discord.Role
     ):
 
-        if level < 1:
-
-            return await ctx.send(
-                "❌ Level must be 1 or higher."
-            )
-
-
         if ctx.guild is None:
 
             return await ctx.send(
                 "❌ This command can only be used in a server."
+            )
+
+
+        if level < 1:
+
+            return await ctx.send(
+                "❌ Level must be 1 or higher."
             )
 
 
@@ -730,6 +737,17 @@ class Leveling(commands.Cog):
             return await ctx.send(
                 "❌ I can't manage that role because it is "
                 "higher than or equal to my highest role."
+            )
+
+
+        # --------------------------------------------------
+        # Prevent @everyone
+        # --------------------------------------------------
+
+        if role == ctx.guild.default_role:
+
+            return await ctx.send(
+                "❌ You can't use the @everyone role."
             )
 
 
@@ -779,139 +797,44 @@ class Leveling(commands.Cog):
 
 
     # ======================================================
-    # !LEADERBOARD
+    # ERROR HANDLER - SET LEVEL ROLE
     # ======================================================
 
-    @commands.command(
-        aliases=["lb"]
-    )
-    async def leaderboard(
+    @setlevelrole.error
+    async def setlevelrole_error(
         self,
-        ctx
+        ctx,
+        error
     ):
 
-        if ctx.guild is None:
+        if isinstance(
+            error,
+            commands.MissingPermissions
+        ):
 
-            return await ctx.send(
-                "❌ This command can only be used in a server."
+            await ctx.send(
+                "❌ You need Administrator permission "
+                "to use this command."
             )
 
+        elif isinstance(
+            error,
+            commands.MissingRequiredArgument
+        ):
 
-        db = get_db()
-
-        try:
-
-            cursor = db.cursor()
-
-            cursor.execute(
-                """
-                SELECT
-                    user_id,
-                    level,
-                    xp
-                FROM levels
-                ORDER BY
-                    level DESC,
-                    xp DESC
-                LIMIT 10
-                """
+            await ctx.send(
+                "❌ Usage: `!setlevelrole <level> @role`"
             )
 
-            results = cursor.fetchall()
+        elif isinstance(
+            error,
+            commands.BadArgument
+        ):
 
-        finally:
-
-            db.close()
-
-
-        if not results:
-
-            return await ctx.send(
-                "Nobody has earned XP yet."
+            await ctx.send(
+                "❌ Make sure the level is a number and "
+                "you mention a valid Discord role."
             )
-
-
-        medals = [
-            "🥇",
-            "🥈",
-            "🥉"
-        ]
-
-
-        embed = discord.Embed(
-            title="🏆 Grid Guardian Leaderboard",
-            description=(
-                "Top 10 members by level"
-            ),
-            color=EMBED_COLOR
-        )
-
-
-        displayed = 0
-
-
-        for index, row in enumerate(results):
-
-            user_id = row["user_id"]
-            level = row["level"]
-            xp = row["xp"]
-
-
-            member = ctx.guild.get_member(
-                user_id
-            )
-
-
-            if member is None:
-                continue
-
-
-            if index < 3:
-
-                place = medals[index]
-
-            else:
-
-                place = (
-                    f"**{index + 1}.**"
-                )
-
-
-            embed.add_field(
-                name=(
-                    f"{place} "
-                    f"{member.display_name}"
-                ),
-                value=(
-                    f"⭐ Level **{level}**\n"
-                    f"⚡ XP **{xp}/"
-                    f"{self.xp_required(level)}**"
-                ),
-                inline=False
-            )
-
-
-            displayed += 1
-
-
-        if displayed == 0:
-
-            return await ctx.send(
-                "Nobody has earned XP yet."
-            )
-
-
-        embed.set_footer(
-            text=(
-                f"Requested by "
-                f"{ctx.author.display_name}"
-            )
-        )
-
-
-        await ctx.send(
-            embed=embed
-        )
 
 
 # ==========================================================
