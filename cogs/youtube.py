@@ -34,6 +34,10 @@ class YouTube(commands.Cog):
         self.youtube = None
         self.channel_id = None
 
+        # Prevent the first check after a bot restart from treating
+        # the current upload as a brand-new video.
+        self.initialized_guilds = set()
+
         self.youtube_check.start()
 
     def cog_unload(self):
@@ -197,8 +201,36 @@ class YouTube(commands.Cog):
             if discord_channel is None:
                 continue
 
-            # First time setup:
-            # Remember the current video without announcing it.
+            # -------------------------------------------------
+            # STARTUP SYNC PROTECTION
+            # -------------------------------------------------
+            # The first successful check for each guild after a
+            # restart only remembers the current video. It never
+            # announces it, even if the database was lost or the
+            # saved state is stale.
+            if guild_id not in self.initialized_guilds:
+
+                cursor.execute("""
+                UPDATE youtube_settings
+                SET last_video_id=?
+                WHERE guild_id=?
+                """, (
+                    video["id"],
+                    guild_id
+                ))
+
+                db.commit()
+
+                self.initialized_guilds.add(guild_id)
+
+                print(
+                    f"▶️ YouTube startup sync complete for {discord_guild.name}."
+                )
+
+                continue
+
+            # First-time setup protection for any configuration that
+            # was created before this startup-sync system existed.
             if last_video_id is None:
 
                 cursor.execute("""
@@ -356,6 +388,13 @@ class YouTube(commands.Cog):
             ))
 
             db.commit()
+
+        # Setup has already established the current video as the
+        # baseline, so the next automatic check may look for new
+        # uploads normally.
+        self.initialized_guilds.add(
+            ctx.guild.id
+        )
 
         embed = discord.Embed(
             title="✅ YouTube Notifications Enabled",

@@ -26,15 +26,8 @@ CHECK_INTERVAL_MINUTES = 10
 
 db = sqlite3.connect(
     "gridguardian.db",
-    timeout=30,
     check_same_thread=False
 )
-
-# Give SQLite time to wait for another cog to finish a write instead
-# of immediately raising "database is locked".
-db.execute("PRAGMA busy_timeout = 30000")
-db.execute("PRAGMA journal_mode = WAL")
-db.execute("PRAGMA synchronous = NORMAL")
 
 cursor = db.cursor()
 
@@ -95,6 +88,10 @@ class TikTok(commands.Cog):
         self.bot = bot
 
         self.check_lock = asyncio.Lock()
+
+        # The first successful check for each guild after startup is
+        # a baseline sync only. It never announces the current TikTok.
+        self.initialized_guilds = set()
 
         self.tiktok_check_loop.start()
 
@@ -812,6 +809,32 @@ class TikTok(commands.Cog):
             return
 
 
+        # --------------------------------------------------
+        # STARTUP SYNC PROTECTION
+        # --------------------------------------------------
+        # Never announce the current TikTok merely because the bot
+        # restarted. The first successful check after startup stores
+        # the current video as the baseline.
+        if guild.id not in self.initialized_guilds:
+
+            self.update_last_video(
+                guild.id,
+                video["id"],
+                video["url"]
+            )
+
+            self.initialized_guilds.add(
+                guild.id
+            )
+
+            print(
+                "🎵 TikTok startup sync complete for "
+                f"{guild.name}."
+            )
+
+            return
+
+
         last_video_id = settings.get(
             "last_video_id"
         )
@@ -1010,6 +1033,12 @@ class TikTok(commands.Cog):
 
             video["url"]
 
+        )
+
+        # The setup command has already established the current
+        # TikTok as the baseline.
+        self.initialized_guilds.add(
+            ctx.guild.id
         )
 
 

@@ -85,6 +85,11 @@ class Instagram(commands.Cog):
         # this cog's database connection at the same time.
         self.check_lock = asyncio.Lock()
 
+        # Guilds are initialized on the first successful check after
+        # every bot startup. Existing posts are remembered but never
+        # announced during this startup sync.
+        self.initialized_guilds = set()
+
         self.instagram_loop.start()
 
 
@@ -554,6 +559,39 @@ class Instagram(commands.Cog):
             return
 
 
+        # --------------------------------------------------
+        # STARTUP SYNC PROTECTION
+        # --------------------------------------------------
+        # On every bot restart, the first successful check for a
+        # guild only records the currently visible Instagram posts.
+        # This prevents old posts from being announced as new posts
+        # after Railway restarts or reconnects.
+        #
+        # We intentionally do this even if instagram_posts already
+        # contains data. The database is not used to decide whether
+        # the current startup should announce content.
+        if guild_id not in self.initialized_guilds:
+
+            for media in media_list:
+
+                media_id = media.get("id")
+
+                if media_id:
+
+                    self.save_post(
+                        guild_id,
+                        media_id
+                    )
+
+            self.initialized_guilds.add(guild_id)
+
+            print(
+                f"📸 Instagram startup sync complete for {guild.name}."
+            )
+
+            return
+
+
         new_posts = []
 
 
@@ -582,49 +620,6 @@ class Instagram(commands.Cog):
             new_posts.append(
                 media
             )
-
-
-        # --------------------------------------------------
-        # FIRST RUN PROTECTION
-        # --------------------------------------------------
-
-        cursor.execute("""
-        SELECT COUNT(*)
-        FROM instagram_posts
-        WHERE guild_id = ?
-        """, (
-            guild_id,
-        ))
-
-
-        saved_count = (
-            cursor.fetchone()[0]
-        )
-
-
-        if saved_count == 0:
-
-            for media in media_list:
-
-                media_id = media.get(
-                    "id"
-                )
-
-
-                if media_id:
-
-                    self.save_post(
-                        guild_id,
-                        media_id
-                    )
-
-
-            print(
-                f"📸 Instagram initialized "
-                f"for {guild.name}."
-            )
-
-            return
 
 
         # --------------------------------------------------
@@ -829,6 +824,12 @@ class Instagram(commands.Cog):
         ))
 
         db.commit()
+
+        # The next check will initialize the newly configured account
+        # without announcing the existing posts.
+        self.initialized_guilds.discard(
+            ctx.guild.id
+        )
 
 
         embed = discord.Embed(
