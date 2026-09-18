@@ -1,3 +1,35 @@
+"""
+Grid Guardian - Advanced Moderation
+
+Features:
+    !warn @user <reason>
+    !warnings @user
+    !clearwarnings @user
+
+    !kick @user <reason>
+    !ban @user <reason>
+    !unban <user_id>
+
+    !timeout @user <minutes> <reason>
+    !untimeout @user
+
+    !case <case_id>
+    !modlog #channel
+    !modsettings
+    !setpunishment <warning_count> <action>
+    !moderationhelp
+
+Features include:
+    - Persistent warning history
+    - Moderation case IDs
+    - Moderation logs
+    - Role hierarchy protection
+    - Self-action protection
+    - Bot protection
+    - Warning escalation
+    - SQLite persistence
+"""
+
 import sqlite3
 from datetime import timedelta
 
@@ -5,232 +37,541 @@ import discord
 from discord.ext import commands
 
 
-# =========================================================
-# SETTINGS
-# =========================================================
+# ==========================================================
+# CONFIGURATION
+# ==========================================================
 
-EMBED_COLOR = discord.Color.from_rgb(80, 220, 255)
 DB_PATH = "gridguardian.db"
 
-
-# =========================================================
-# DATABASE
-# =========================================================
-
-db = sqlite3.connect(DB_PATH)
-db.row_factory = sqlite3.Row
-cursor = db.cursor()
-
-
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS warnings (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    user_id INTEGER NOT NULL,
-    moderator_id INTEGER NOT NULL,
-    reason TEXT NOT NULL,
-    timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+EMBED_COLOR = discord.Color.from_rgb(
+    80,
+    220,
+    255
 )
-""")
 
-db.commit()
+DEFAULT_REASON = "No reason provided"
 
 
-# =========================================================
-# HELPER FUNCTIONS
-# =========================================================
+# ==========================================================
+# DATABASE
+# ==========================================================
 
-def parse_time(time_string: str):
+def get_db():
     """
-    Converts:
-        10s -> 10 seconds
-        5m  -> 5 minutes
-        2h  -> 2 hours
-        3d  -> 3 days
-
-    Returns a timedelta or None.
+    Create a fresh SQLite connection.
     """
 
-    time_string = time_string.lower().strip()
+    connection = sqlite3.connect(
+        DB_PATH,
+        timeout=30,
+        check_same_thread=False
+    )
 
-    if len(time_string) < 2:
-        return None
+    connection.row_factory = sqlite3.Row
+
+    connection.execute(
+        "PRAGMA busy_timeout = 30000"
+    )
+
+    connection.execute(
+        "PRAGMA journal_mode = WAL"
+    )
+
+    connection.execute(
+        "PRAGMA synchronous = NORMAL"
+    )
+
+    return connection
+
+
+def initialize_database():
+    """
+    Create moderation tables.
+    """
+
+    db = get_db()
 
     try:
-        amount = int(time_string[:-1])
-    except ValueError:
-        return None
 
-    unit = time_string[-1]
+        cursor = db.cursor()
 
-    if amount <= 0:
-        return None
+        # --------------------------------------------------
+        # Moderation cases
+        # --------------------------------------------------
 
-    if unit == "s":
-        return timedelta(seconds=amount)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS moderation_cases (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                moderator_id INTEGER NOT NULL,
+                action TEXT NOT NULL,
+                reason TEXT NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
 
-    if unit == "m":
-        return timedelta(minutes=amount)
+        # --------------------------------------------------
+        # Warnings
+        # --------------------------------------------------
 
-    if unit == "h":
-        return timedelta(hours=amount)
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS moderation_warnings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                guild_id INTEGER NOT NULL,
+                user_id INTEGER NOT NULL,
+                moderator_id INTEGER NOT NULL,
+                reason TEXT NOT NULL,
+                case_id INTEGER,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
 
-    if unit == "d":
-        return timedelta(days=amount)
+        # --------------------------------------------------
+        # Moderation settings
+        # --------------------------------------------------
 
-    return None
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS moderation_settings (
+                guild_id INTEGER PRIMARY KEY,
+                log_channel_id INTEGER,
+                timeout_warning_count INTEGER DEFAULT 0,
+                kick_warning_count INTEGER DEFAULT 0,
+                ban_warning_count INTEGER DEFAULT 0
+            )
+        """)
 
+        db.commit()
 
-def can_moderate(ctx, member: discord.Member):
-    """
-    Checks whether the command author is allowed to
-    moderate the target member.
+    finally:
 
-    Returns:
-        True  -> allowed
-        False -> not allowed
-    """
-
-    if member == ctx.author:
-        return False
-
-    if member == ctx.guild.owner:
-        return False
-
-    if (
-        member.top_role >= ctx.author.top_role
-        and ctx.author != ctx.guild.owner
-    ):
-        return False
-
-    return True
-
-
-def bot_can_moderate(guild, member: discord.Member):
-    """
-    Makes sure Grid Guardian's highest role is above
-    the target member's highest role.
-    """
-
-    me = guild.me
-
-    if me is None:
-        return False
-
-    if member == guild.owner:
-        return False
-
-    if member.top_role >= me.top_role:
-        return False
-
-    return True
+        db.close()
 
 
-# =========================================================
+initialize_database()
+
+
+# ==========================================================
 # MODERATION COG
-# =========================================================
+# ==========================================================
 
 class Moderation(commands.Cog):
 
     def __init__(self, bot):
+
         self.bot = bot
 
-    # =====================================================
-    # MODERATION LOGGING
-    # =====================================================
 
-    async def send_mod_log(
-        self,
-        guild,
-        action,
-        moderator,
-        member=None,
-        reason=None,
-        color=None
+    # ======================================================
+    # DATABASE HELPERS
+    # ======================================================
+
+    @staticmethod
+    def create_case(
+        guild_id: int,
+        user_id: int,
+        moderator_id: int,
+        action: str,
+        reason: str
     ):
-        """
-        Sends moderation actions to the configured
-        moderation log channel.
-        """
 
-        if color is None:
-            color = discord.Color.orange()
+        db = get_db()
 
         try:
-            cursor.execute("""
-            SELECT log_channel_id
-            FROM settings
-            WHERE guild_id = ?
-            """, (guild.id,))
+
+            cursor = db.cursor()
+
+            cursor.execute(
+                """
+                INSERT INTO moderation_cases (
+                    guild_id,
+                    user_id,
+                    moderator_id,
+                    action,
+                    reason
+                )
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    guild_id,
+                    user_id,
+                    moderator_id,
+                    action,
+                    reason
+                )
+            )
+
+            case_id = cursor.lastrowid
+
+            db.commit()
+
+            return case_id
+
+        finally:
+
+            db.close()
+
+
+    @staticmethod
+    def create_warning(
+        guild_id: int,
+        user_id: int,
+        moderator_id: int,
+        reason: str,
+        case_id: int
+    ):
+
+        db = get_db()
+
+        try:
+
+            cursor = db.cursor()
+
+            cursor.execute(
+                """
+                INSERT INTO moderation_warnings (
+                    guild_id,
+                    user_id,
+                    moderator_id,
+                    reason,
+                    case_id
+                )
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (
+                    guild_id,
+                    user_id,
+                    moderator_id,
+                    reason,
+                    case_id
+                )
+            )
+
+            warning_id = cursor.lastrowid
+
+            db.commit()
+
+            return warning_id
+
+        finally:
+
+            db.close()
+
+
+    @staticmethod
+    def get_warning_count(
+        guild_id: int,
+        user_id: int
+    ) -> int:
+
+        db = get_db()
+
+        try:
+
+            cursor = db.cursor()
+
+            cursor.execute(
+                """
+                SELECT COUNT(*) AS count
+                FROM moderation_warnings
+                WHERE guild_id = ?
+                AND user_id = ?
+                """,
+                (
+                    guild_id,
+                    user_id
+                )
+            )
 
             result = cursor.fetchone()
 
-        except sqlite3.Error:
-            return
+            return int(result["count"])
 
-        if not result:
-            return
+        finally:
 
-        log_channel_id = result["log_channel_id"]
+            db.close()
 
-        if not log_channel_id:
-            return
 
-        log_channel = guild.get_channel(log_channel_id)
+    @staticmethod
+    def get_settings(
+        guild_id: int
+    ):
 
-        if log_channel is None:
-            return
-
-        embed = discord.Embed(
-            title=f"🛡️ Moderation: {action}",
-            color=color,
-            timestamp=discord.utils.utcnow()
-        )
-
-        # -------------------------------------------------
-        # USER
-        # -------------------------------------------------
-
-        if member:
-
-            embed.add_field(
-                name="👤 User",
-                value=(
-                    f"{member.mention}\n"
-                    f"`{member.id}`"
-                ),
-                inline=True
-            )
-
-        # -------------------------------------------------
-        # MODERATOR
-        # -------------------------------------------------
-
-        if moderator:
-
-            embed.add_field(
-                name="🛡️ Moderator",
-                value=(
-                    f"{moderator.mention}\n"
-                    f"`{moderator.id}`"
-                ),
-                inline=True
-            )
-
-        # -------------------------------------------------
-        # REASON
-        # -------------------------------------------------
-
-        if reason:
-
-            embed.add_field(
-                name="📝 Reason",
-                value=reason[:1000],
-                inline=False
-            )
+        db = get_db()
 
         try:
 
-            await log_channel.send(
+            cursor = db.cursor()
+
+            cursor.execute(
+                """
+                INSERT OR IGNORE INTO moderation_settings (
+                    guild_id
+                )
+                VALUES (?)
+                """,
+                (
+                    guild_id,
+                )
+            )
+
+            db.commit()
+
+            cursor.execute(
+                """
+                SELECT *
+                FROM moderation_settings
+                WHERE guild_id = ?
+                """,
+                (
+                    guild_id,
+                )
+            )
+
+            return cursor.fetchone()
+
+        finally:
+
+            db.close()
+
+
+    @staticmethod
+    def update_setting(
+        guild_id: int,
+        column: str,
+        value
+    ):
+
+        allowed_columns = {
+            "log_channel_id",
+            "timeout_warning_count",
+            "kick_warning_count",
+            "ban_warning_count"
+        }
+
+        if column not in allowed_columns:
+            return
+
+        db = get_db()
+
+        try:
+
+            cursor = db.cursor()
+
+            cursor.execute(
+                """
+                INSERT OR IGNORE INTO moderation_settings (
+                    guild_id
+                )
+                VALUES (?)
+                """,
+                (
+                    guild_id,
+                )
+            )
+
+            cursor.execute(
+                f"""
+                UPDATE moderation_settings
+                SET {column} = ?
+                WHERE guild_id = ?
+                """,
+                (
+                    value,
+                    guild_id
+                )
+            )
+
+            db.commit()
+
+        finally:
+
+            db.close()
+
+
+    # ======================================================
+    # CASE LOOKUP
+    # ======================================================
+
+    @staticmethod
+    def get_case(
+        guild_id: int,
+        case_id: int
+    ):
+
+        db = get_db()
+
+        try:
+
+            cursor = db.cursor()
+
+            cursor.execute(
+                """
+                SELECT *
+                FROM moderation_cases
+                WHERE guild_id = ?
+                AND id = ?
+                """,
+                (
+                    guild_id,
+                    case_id
+                )
+            )
+
+            return cursor.fetchone()
+
+        finally:
+
+            db.close()
+
+
+    # ======================================================
+    # HIERARCHY CHECK
+    # ======================================================
+
+    @staticmethod
+    def can_moderate(
+        ctx,
+        member: discord.Member
+    ):
+        """
+        Check whether the moderator is allowed to act
+        on the target.
+        """
+
+        if member == ctx.author:
+
+            return False, (
+                "❌ You cannot moderate yourself."
+            )
+
+
+        if member == ctx.guild.owner:
+
+            return False, (
+                "❌ You cannot moderate the server owner."
+            )
+
+
+        if member == ctx.guild.me:
+
+            return False, (
+                "❌ You cannot moderate me."
+            )
+
+
+        # --------------------------------------------------
+        # Moderator hierarchy
+        # --------------------------------------------------
+
+        if (
+            ctx.author != ctx.guild.owner
+            and member.top_role >= ctx.author.top_role
+        ):
+
+            return False, (
+                "❌ You cannot moderate someone with "
+                "an equal or higher role."
+            )
+
+
+        # --------------------------------------------------
+        # Bot hierarchy
+        # --------------------------------------------------
+
+        if member.top_role >= ctx.guild.me.top_role:
+
+            return False, (
+                "❌ I cannot moderate that member because "
+                "their highest role is equal to or higher "
+                "than mine."
+            )
+
+
+        return True, None
+
+
+    # ======================================================
+    # SEND MODERATION LOG
+    # ======================================================
+
+    async def send_mod_log(
+        self,
+        guild: discord.Guild,
+        case_id: int,
+        action: str,
+        target_id: int,
+        moderator: discord.Member,
+        reason: str,
+        color: discord.Color
+    ):
+
+        settings = self.get_settings(
+            guild.id
+        )
+
+        channel_id = settings["log_channel_id"]
+
+        if not channel_id:
+            return
+
+
+        channel = guild.get_channel(
+            channel_id
+        )
+
+        if channel is None:
+            return
+
+
+        target = guild.get_member(
+            target_id
+        )
+
+        target_text = (
+            target.mention
+            if target
+            else f"<@{target_id}>"
+        )
+
+
+        embed = discord.Embed(
+            title=f"🛡️ Moderation • {action}",
+            color=color
+        )
+
+        embed.add_field(
+            name="🆔 Case",
+            value=f"#{case_id}",
+            inline=True
+        )
+
+        embed.add_field(
+            name="👤 User",
+            value=target_text,
+            inline=True
+        )
+
+        embed.add_field(
+            name="👮 Moderator",
+            value=moderator.mention,
+            inline=True
+        )
+
+        embed.add_field(
+            name="📝 Reason",
+            value=reason,
+            inline=False
+        )
+
+        embed.set_footer(
+            text="Grid Guardian Moderation"
+        )
+
+
+        try:
+
+            await channel.send(
                 embed=embed
             )
 
@@ -238,73 +579,294 @@ class Moderation(commands.Cog):
             discord.Forbidden,
             discord.HTTPException
         ):
+
             pass
 
-    # =====================================================
-    # WARN
-    # =====================================================
+
+    # ======================================================
+    # APPLY WARNING ESCALATION
+    # ======================================================
+
+    async def process_escalation(
+        self,
+        ctx,
+        member: discord.Member,
+        warning_count: int
+    ):
+        """
+        Check configured warning thresholds.
+
+        Priority:
+            Ban
+            Kick
+            Timeout
+        """
+
+        settings = self.get_settings(
+            ctx.guild.id
+        )
+
+
+        # --------------------------------------------------
+        # BAN
+        # --------------------------------------------------
+
+        ban_threshold = int(
+            settings["ban_warning_count"] or 0
+        )
+
+        if (
+            ban_threshold > 0
+            and warning_count >= ban_threshold
+        ):
+
+            try:
+
+                case_id = self.create_case(
+                    ctx.guild.id,
+                    member.id,
+                    ctx.author.id,
+                    "Ban",
+                    (
+                        f"Automatic escalation after "
+                        f"{warning_count} warnings."
+                    )
+                )
+
+                await member.ban(
+                    reason=(
+                        f"Automatic escalation after "
+                        f"{warning_count} warnings."
+                    )
+                )
+
+                await self.send_mod_log(
+                    ctx.guild,
+                    case_id,
+                    "Ban",
+                    member.id,
+                    ctx.author,
+                    (
+                        f"Automatic escalation after "
+                        f"{warning_count} warnings."
+                    ),
+                    discord.Color.red()
+                )
+
+                return (
+                    "🔨 Automatic escalation: "
+                    "member banned."
+                )
+
+            except (
+                discord.Forbidden,
+                discord.HTTPException
+            ):
+
+                return (
+                    "⚠️ The warning threshold was reached, "
+                    "but I could not ban the member."
+                )
+
+
+        # --------------------------------------------------
+        # KICK
+        # --------------------------------------------------
+
+        kick_threshold = int(
+            settings["kick_warning_count"] or 0
+        )
+
+        if (
+            kick_threshold > 0
+            and warning_count >= kick_threshold
+        ):
+
+            try:
+
+                case_id = self.create_case(
+                    ctx.guild.id,
+                    member.id,
+                    ctx.author.id,
+                    "Kick",
+                    (
+                        f"Automatic escalation after "
+                        f"{warning_count} warnings."
+                    )
+                )
+
+                await member.kick(
+                    reason=(
+                        f"Automatic escalation after "
+                        f"{warning_count} warnings."
+                    )
+                )
+
+                await self.send_mod_log(
+                    ctx.guild,
+                    case_id,
+                    "Kick",
+                    member.id,
+                    ctx.author,
+                    (
+                        f"Automatic escalation after "
+                        f"{warning_count} warnings."
+                    ),
+                    discord.Color.red()
+                )
+
+                return (
+                    "👢 Automatic escalation: "
+                    "member kicked."
+                )
+
+            except (
+                discord.Forbidden,
+                discord.HTTPException
+            ):
+
+                return (
+                    "⚠️ The warning threshold was reached, "
+                    "but I could not kick the member."
+                )
+
+
+        # --------------------------------------------------
+        # TIMEOUT
+        # --------------------------------------------------
+
+        timeout_threshold = int(
+            settings["timeout_warning_count"] or 0
+        )
+
+        if (
+            timeout_threshold > 0
+            and warning_count >= timeout_threshold
+        ):
+
+            try:
+
+                duration = timedelta(
+                    minutes=10
+                )
+
+                case_id = self.create_case(
+                    ctx.guild.id,
+                    member.id,
+                    ctx.author.id,
+                    "Timeout",
+                    (
+                        f"Automatic escalation after "
+                        f"{warning_count} warnings."
+                    )
+                )
+
+                await member.timeout(
+                    duration,
+                    reason=(
+                        f"Automatic escalation after "
+                        f"{warning_count} warnings."
+                    )
+                )
+
+                await self.send_mod_log(
+                    ctx.guild,
+                    case_id,
+                    "Timeout",
+                    member.id,
+                    ctx.author,
+                    (
+                        f"Automatic escalation after "
+                        f"{warning_count} warnings."
+                    ),
+                    discord.Color.orange()
+                )
+
+                return (
+                    "⏱️ Automatic escalation: "
+                    "member timed out for 10 minutes."
+                )
+
+            except (
+                discord.Forbidden,
+                discord.HTTPException
+            ):
+
+                return (
+                    "⚠️ The warning threshold was reached, "
+                    "but I could not timeout the member."
+                )
+
+
+        return None
+
+
+    # ======================================================
+    # !WARN
+    # ======================================================
 
     @commands.command()
-    @commands.has_permissions(manage_messages=True)
+    @commands.has_permissions(
+        moderate_members=True
+    )
     async def warn(
         self,
         ctx,
         member: discord.Member,
         *,
-        reason: str = "No reason provided."
+        reason: str = DEFAULT_REASON
     ):
 
-        if member.bot:
+        if ctx.guild is None:
 
             return await ctx.send(
-                "❌ You cannot warn a bot."
+                "❌ This command can only be used in a server."
             )
 
-        if not can_moderate(ctx, member):
+
+        allowed, error = self.can_moderate(
+            ctx,
+            member
+        )
+
+        if not allowed:
 
             return await ctx.send(
-                "❌ You cannot warn someone with an equal "
-                "or higher role than you."
+                error
             )
 
-        if not bot_can_moderate(ctx.guild, member):
 
-            return await ctx.send(
-                "❌ My role is not high enough to moderate that member."
-            )
+        # --------------------------------------------------
+        # Create case
+        # --------------------------------------------------
 
-        try:
+        case_id = self.create_case(
+            ctx.guild.id,
+            member.id,
+            ctx.author.id,
+            "Warning",
+            reason
+        )
 
-            cursor.execute("""
-            INSERT INTO warnings (
-                user_id,
-                moderator_id,
-                reason
-            )
-            VALUES (?, ?, ?)
-            """, (
-                member.id,
-                ctx.author.id,
-                reason
-            ))
 
-            db.commit()
+        # --------------------------------------------------
+        # Create warning
+        # --------------------------------------------------
 
-            warning_id = cursor.lastrowid
+        warning_id = self.create_warning(
+            ctx.guild.id,
+            member.id,
+            ctx.author.id,
+            reason,
+            case_id
+        )
 
-            cursor.execute("""
-            SELECT COUNT(*)
-            FROM warnings
-            WHERE user_id = ?
-            """, (member.id,))
 
-            warning_count = cursor.fetchone()[0]
+        warning_count = self.get_warning_count(
+            ctx.guild.id,
+            member.id
+        )
 
-        except sqlite3.Error:
-
-            return await ctx.send(
-                "❌ I couldn't save the warning to the database."
-            )
 
         embed = discord.Embed(
             title="⚠️ Member Warned",
@@ -315,9 +877,15 @@ class Moderation(commands.Cog):
         )
 
         embed.add_field(
-            name="📝 Reason",
-            value=reason[:1000],
-            inline=False
+            name="🆔 Case",
+            value=f"#{case_id}",
+            inline=True
+        )
+
+        embed.add_field(
+            name="⚠️ Warning",
+            value=f"#{warning_id}",
+            inline=True
         )
 
         embed.add_field(
@@ -327,301 +895,8 @@ class Moderation(commands.Cog):
         )
 
         embed.add_field(
-            name="🆔 Warning ID",
-            value=f"#{warning_id}",
-            inline=True
-        )
-
-        embed.set_footer(
-            text=f"Moderator: {ctx.author}"
-        )
-
-        await ctx.send(
-            embed=embed
-        )
-
-        await self.send_mod_log(
-            ctx.guild,
-            "Warning",
-            ctx.author,
-            member,
-            reason,
-            discord.Color.orange()
-        )
-
-    # =====================================================
-    # VIEW WARNINGS
-    # =====================================================
-
-    @commands.command()
-    @commands.has_permissions(manage_messages=True)
-    async def warnings(
-        self,
-        ctx,
-        member: discord.Member
-    ):
-
-        try:
-
-            cursor.execute("""
-            SELECT
-                id,
-                moderator_id,
-                reason,
-                timestamp
-            FROM warnings
-            WHERE user_id = ?
-            ORDER BY id DESC
-            """, (member.id,))
-
-            results = cursor.fetchall()
-
-        except sqlite3.Error:
-
-            return await ctx.send(
-                "❌ I couldn't read the warnings database."
-            )
-
-        if not results:
-
-            return await ctx.send(
-                f"✅ {member.mention} has no warnings."
-            )
-
-        embed = discord.Embed(
-            title=f"⚠️ Warnings for {member}",
-            description=(
-                f"Total warnings: **{len(results)}**"
-            ),
-            color=discord.Color.orange()
-        )
-
-        # Show newest 10 warnings.
-
-        for row in results[:10]:
-
-            warning_id = row["id"]
-            moderator_id = row["moderator_id"]
-            reason = row["reason"]
-            timestamp = row["timestamp"]
-
-            moderator = ctx.guild.get_member(
-                moderator_id
-            )
-
-            if moderator:
-
-                moderator_name = moderator.mention
-
-            else:
-
-                moderator_name = (
-                    f"`{moderator_id}`"
-                )
-
-            embed.add_field(
-                name=f"Warning #{warning_id}",
-                value=(
-                    f"**Reason:** {reason[:500]}\n"
-                    f"**Moderator:** {moderator_name}\n"
-                    f"**Date:** {timestamp}"
-                ),
-                inline=False
-            )
-
-        if len(results) > 10:
-
-            embed.set_footer(
-                text=(
-                    f"Showing the newest 10 "
-                    f"of {len(results)} warnings."
-                )
-            )
-
-        await ctx.send(
-            embed=embed
-        )
-
-    # =====================================================
-    # CLEAR WARNINGS
-    # =====================================================
-
-    @commands.command()
-    @commands.has_permissions(manage_guild=True)
-    async def clearwarnings(
-        self,
-        ctx,
-        member: discord.Member
-    ):
-
-        if member.bot:
-
-            return await ctx.send(
-                "❌ Bots do not have warnings."
-            )
-
-        if not can_moderate(ctx, member):
-
-            return await ctx.send(
-                "❌ You cannot clear warnings for someone "
-                "with an equal or higher role."
-            )
-
-        try:
-
-            cursor.execute("""
-            SELECT COUNT(*)
-            FROM warnings
-            WHERE user_id = ?
-            """, (member.id,))
-
-            warning_count = cursor.fetchone()[0]
-
-        except sqlite3.Error:
-
-            return await ctx.send(
-                "❌ I couldn't read the warnings database."
-            )
-
-        if warning_count == 0:
-
-            return await ctx.send(
-                f"✅ {member.mention} has no warnings."
-            )
-
-        try:
-
-            cursor.execute("""
-            DELETE FROM warnings
-            WHERE user_id = ?
-            """, (member.id,))
-
-            db.commit()
-
-        except sqlite3.Error:
-
-            return await ctx.send(
-                "❌ I couldn't clear the warnings."
-            )
-
-        embed = discord.Embed(
-            title="🗑️ Warnings Cleared",
-            description=(
-                f"Removed **{warning_count}** warning(s) "
-                f"from {member.mention}."
-            ),
-            color=discord.Color.green()
-        )
-
-        embed.set_footer(
-            text=f"Moderator: {ctx.author}"
-        )
-
-        await ctx.send(
-            embed=embed
-        )
-
-        await self.send_mod_log(
-            ctx.guild,
-            "Warnings Cleared",
-            ctx.author,
-            member,
-            f"{warning_count} warning(s) removed.",
-            discord.Color.green()
-        )
-
-    # =====================================================
-    # TIMEOUT
-    # =====================================================
-
-    @commands.command()
-    @commands.has_permissions(moderate_members=True)
-    async def timeout(
-        self,
-        ctx,
-        member: discord.Member,
-        duration: str,
-        *,
-        reason: str = "No reason provided."
-    ):
-
-        if member.bot:
-
-            return await ctx.send(
-                "❌ You cannot timeout a bot."
-            )
-
-        if not can_moderate(ctx, member):
-
-            return await ctx.send(
-                "❌ You cannot timeout someone with an "
-                "equal or higher role than you."
-            )
-
-        if not bot_can_moderate(ctx.guild, member):
-
-            return await ctx.send(
-                "❌ My role is not high enough to timeout that member."
-            )
-
-        duration_delta = parse_time(duration)
-
-        if duration_delta is None:
-
-            return await ctx.send(
-                "❌ Invalid time format.\n\n"
-                "Use:\n"
-                "`10s` = 10 seconds\n"
-                "`5m` = 5 minutes\n"
-                "`2h` = 2 hours\n"
-                "`3d` = 3 days"
-            )
-
-        if duration_delta > timedelta(days=28):
-
-            return await ctx.send(
-                "❌ Discord only allows timeouts up to 28 days."
-            )
-
-        until = (
-            discord.utils.utcnow()
-            + duration_delta
-        )
-
-        try:
-
-            await member.timeout(
-                until,
-                reason=reason
-            )
-
-        except discord.Forbidden:
-
-            return await ctx.send(
-                "❌ I don't have permission to timeout that member."
-            )
-
-        except discord.HTTPException:
-
-            return await ctx.send(
-                "❌ Discord rejected the timeout request."
-            )
-
-        embed = discord.Embed(
-            title="🔇 Member Timed Out",
-            description=member.mention,
-            color=discord.Color.red()
-        )
-
-        embed.add_field(
-            name="⏱️ Duration",
-            value=duration,
-            inline=True
-        )
-
-        embed.add_field(
             name="📝 Reason",
-            value=reason[:1000],
+            value=reason,
             inline=False
         )
 
@@ -629,120 +904,266 @@ class Moderation(commands.Cog):
             text=f"Moderator: {ctx.author}"
         )
 
+
         await ctx.send(
             embed=embed
         )
 
+
         await self.send_mod_log(
             ctx.guild,
-            "Timeout",
+            case_id,
+            "Warning",
+            member.id,
             ctx.author,
-            member,
             reason,
-            discord.Color.red()
+            discord.Color.orange()
         )
 
-    # =====================================================
-    # REMOVE TIMEOUT
-    # =====================================================
+
+        # --------------------------------------------------
+        # Escalation
+        # --------------------------------------------------
+
+        escalation = await self.process_escalation(
+            ctx,
+            member,
+            warning_count
+        )
+
+        if escalation:
+
+            await ctx.send(
+                escalation
+            )
+
+
+    # ======================================================
+    # !WARNINGS
+    # ======================================================
 
     @commands.command()
-    @commands.has_permissions(moderate_members=True)
-    async def untimeout(
+    @commands.has_permissions(
+        moderate_members=True
+    )
+    async def warnings(
         self,
         ctx,
         member: discord.Member
     ):
 
-        if not can_moderate(ctx, member):
-
-            return await ctx.send(
-                "❌ You cannot remove a timeout from "
-                "someone with an equal or higher role."
-            )
-
-        if not bot_can_moderate(ctx.guild, member):
-
-            return await ctx.send(
-                "❌ My role is not high enough to manage that member."
-            )
+        db = get_db()
 
         try:
 
-            await member.timeout(
-                None,
-                reason=f"Timeout removed by {ctx.author}"
+            cursor = db.cursor()
+
+            cursor.execute(
+                """
+                SELECT
+                    id,
+                    moderator_id,
+                    reason,
+                    case_id,
+                    created_at
+                FROM moderation_warnings
+                WHERE guild_id = ?
+                AND user_id = ?
+                ORDER BY id DESC
+                """,
+                (
+                    ctx.guild.id,
+                    member.id
+                )
             )
 
-        except discord.Forbidden:
+            results = cursor.fetchall()
+
+        finally:
+
+            db.close()
+
+
+        if not results:
 
             return await ctx.send(
-                "❌ I don't have permission to remove that timeout."
+                f"✅ {member.mention} has no warnings."
             )
 
-        except discord.HTTPException:
-
-            return await ctx.send(
-                "❌ Discord rejected the timeout removal."
-            )
 
         embed = discord.Embed(
-            title="🔊 Timeout Removed",
+            title=f"⚠️ Warnings • {member.display_name}",
             description=(
-                f"{member.mention} can speak again."
+                f"Total warnings: **{len(results)}**"
             ),
-            color=discord.Color.green()
+            color=discord.Color.orange()
         )
 
-        embed.set_footer(
-            text=f"Moderator: {ctx.author}"
-        )
+
+        for row in results[:10]:
+
+            moderator = ctx.guild.get_member(
+                row["moderator_id"]
+            )
+
+            moderator_text = (
+                moderator.mention
+                if moderator
+                else f"<@{row['moderator_id']}>"
+            )
+
+
+            case_text = (
+                f"#{row['case_id']}"
+                if row["case_id"]
+                else "N/A"
+            )
+
+
+            embed.add_field(
+                name=f"⚠️ Warning #{row['id']}",
+                value=(
+                    f"**Case:** {case_text}\n"
+                    f"**Reason:** {row['reason']}\n"
+                    f"**Moderator:** {moderator_text}\n"
+                    f"**Date:** {row['created_at']}"
+                ),
+                inline=False
+            )
+
+
+        if len(results) > 10:
+
+            embed.set_footer(
+                text=(
+                    f"Showing the newest 10 of "
+                    f"{len(results)} warnings."
+                )
+            )
+
 
         await ctx.send(
             embed=embed
         )
 
+
+    # ======================================================
+    # !CLEARWARNINGS
+    # ======================================================
+
+    @commands.command()
+    @commands.has_permissions(
+        manage_guild=True
+    )
+    async def clearwarnings(
+        self,
+        ctx,
+        member: discord.Member
+    ):
+
+        warning_count = self.get_warning_count(
+            ctx.guild.id,
+            member.id
+        )
+
+
+        if warning_count == 0:
+
+            return await ctx.send(
+                f"✅ {member.mention} has no warnings."
+            )
+
+
+        db = get_db()
+
+        try:
+
+            cursor = db.cursor()
+
+            cursor.execute(
+                """
+                DELETE FROM moderation_warnings
+                WHERE guild_id = ?
+                AND user_id = ?
+                """,
+                (
+                    ctx.guild.id,
+                    member.id
+                )
+            )
+
+            db.commit()
+
+        finally:
+
+            db.close()
+
+
+        case_id = self.create_case(
+            ctx.guild.id,
+            member.id,
+            ctx.author.id,
+            "Clear Warnings",
+            (
+                f"Cleared {warning_count} warning(s)."
+            )
+        )
+
+
+        await ctx.send(
+            f"✅ Cleared **{warning_count}** warning(s) "
+            f"from {member.mention}. "
+            f"Case **#{case_id}**."
+        )
+
+
         await self.send_mod_log(
             ctx.guild,
-            "Timeout Removed",
+            case_id,
+            "Clear Warnings",
+            member.id,
             ctx.author,
-            member,
-            None,
+            f"Cleared {warning_count} warning(s).",
             discord.Color.green()
         )
 
-    # =====================================================
-    # KICK
-    # =====================================================
+
+    # ======================================================
+    # !KICK
+    # ======================================================
 
     @commands.command()
-    @commands.has_permissions(kick_members=True)
+    @commands.has_permissions(
+        kick_members=True
+    )
     async def kick(
         self,
         ctx,
         member: discord.Member,
         *,
-        reason: str = "No reason provided."
+        reason: str = DEFAULT_REASON
     ):
 
-        if member.bot:
+        allowed, error = self.can_moderate(
+            ctx,
+            member
+        )
+
+        if not allowed:
 
             return await ctx.send(
-                "❌ You cannot kick a bot."
+                error
             )
 
-        if not can_moderate(ctx, member):
 
-            return await ctx.send(
-                "❌ You cannot kick someone with an "
-                "equal or higher role than you."
-            )
+        case_id = self.create_case(
+            ctx.guild.id,
+            member.id,
+            ctx.author.id,
+            "Kick",
+            reason
+        )
 
-        if not bot_can_moderate(ctx.guild, member):
-
-            return await ctx.send(
-                "❌ My role is not high enough to kick that member."
-            )
 
         try:
 
@@ -762,75 +1183,89 @@ class Moderation(commands.Cog):
                 "❌ Discord rejected the kick request."
             )
 
+
         embed = discord.Embed(
             title="👢 Member Kicked",
             color=discord.Color.red()
         )
 
         embed.add_field(
-            name="👤 User",
-            value=(
-                f"{member}\n"
-                f"`{member.id}`"
-            ),
-            inline=True
+            name="👤 Member",
+            value=member.mention,
+            inline=False
+        )
+
+        embed.add_field(
+            name="👮 Moderator",
+            value=ctx.author.mention,
+            inline=False
         )
 
         embed.add_field(
             name="📝 Reason",
-            value=reason[:1000],
+            value=reason,
             inline=False
         )
 
-        embed.set_footer(
-            text=f"Moderator: {ctx.author}"
+        embed.add_field(
+            name="🆔 Case",
+            value=f"#{case_id}",
+            inline=True
         )
+
 
         await ctx.send(
             embed=embed
         )
 
+
         await self.send_mod_log(
             ctx.guild,
+            case_id,
             "Kick",
+            member.id,
             ctx.author,
-            member,
             reason,
             discord.Color.red()
         )
 
-    # =====================================================
-    # BAN
-    # =====================================================
+
+    # ======================================================
+    # !BAN
+    # ======================================================
 
     @commands.command()
-    @commands.has_permissions(ban_members=True)
+    @commands.has_permissions(
+        ban_members=True
+    )
     async def ban(
         self,
         ctx,
         member: discord.Member,
         *,
-        reason: str = "No reason provided."
+        reason: str = DEFAULT_REASON
     ):
 
-        if member.bot:
+        allowed, error = self.can_moderate(
+            ctx,
+            member
+        )
+
+        if not allowed:
 
             return await ctx.send(
-                "❌ You cannot ban a bot."
+                error
             )
 
-        if not can_moderate(ctx, member):
 
-            return await ctx.send(
-                "❌ You cannot ban someone with an "
-                "equal or higher role than you."
-            )
+        case_id = self.create_case(
+            ctx.guild.id,
+            member.id,
+            ctx.author.id,
+            "Ban",
+            reason
+        )
 
-        if not bot_can_moderate(ctx.guild, member):
-
-            return await ctx.send(
-                "❌ My role is not high enough to ban that member."
-            )
 
         try:
 
@@ -850,49 +1285,61 @@ class Moderation(commands.Cog):
                 "❌ Discord rejected the ban request."
             )
 
+
         embed = discord.Embed(
             title="🔨 Member Banned",
             color=discord.Color.red()
         )
 
         embed.add_field(
-            name="👤 User",
-            value=(
-                f"{member}\n"
-                f"`{member.id}`"
-            ),
-            inline=True
+            name="👤 Member",
+            value=member.mention,
+            inline=False
+        )
+
+        embed.add_field(
+            name="👮 Moderator",
+            value=ctx.author.mention,
+            inline=False
         )
 
         embed.add_field(
             name="📝 Reason",
-            value=reason[:1000],
+            value=reason,
             inline=False
         )
 
-        embed.set_footer(
-            text=f"Moderator: {ctx.author}"
+        embed.add_field(
+            name="🆔 Case",
+            value=f"#{case_id}",
+            inline=True
         )
+
 
         await ctx.send(
             embed=embed
         )
 
+
         await self.send_mod_log(
             ctx.guild,
+            case_id,
             "Ban",
+            member.id,
             ctx.author,
-            member,
             reason,
             discord.Color.red()
         )
 
-    # =====================================================
-    # UNBAN
-    # =====================================================
+
+    # ======================================================
+    # !UNBAN
+    # ======================================================
 
     @commands.command()
-    @commands.has_permissions(ban_members=True)
+    @commands.has_permissions(
+        ban_members=True
+    )
     async def unban(
         self,
         ctx,
@@ -908,14 +1355,15 @@ class Moderation(commands.Cog):
         except discord.NotFound:
 
             return await ctx.send(
-                "❌ I couldn't find that user."
+                "❌ I couldn't find that Discord user."
             )
 
         except discord.HTTPException:
 
             return await ctx.send(
-                "❌ Discord couldn't retrieve that user."
+                "❌ I couldn't retrieve that user."
             )
+
 
         try:
 
@@ -927,7 +1375,7 @@ class Moderation(commands.Cog):
         except discord.NotFound:
 
             return await ctx.send(
-                "❌ That user isn't banned."
+                "❌ That user isn't currently banned."
             )
 
         except discord.Forbidden:
@@ -942,6 +1390,16 @@ class Moderation(commands.Cog):
                 "❌ Discord rejected the unban request."
             )
 
+
+        case_id = self.create_case(
+            ctx.guild.id,
+            user.id,
+            ctx.author.id,
+            "Unban",
+            DEFAULT_REASON
+        )
+
+
         embed = discord.Embed(
             title="🔓 User Unbanned",
             color=discord.Color.green()
@@ -949,243 +1407,736 @@ class Moderation(commands.Cog):
 
         embed.add_field(
             name="👤 User",
-            value=(
-                f"{user}\n"
-                f"`{user.id}`"
-            ),
+            value=f"{user} (`{user.id}`)",
+            inline=False
+        )
+
+        embed.add_field(
+            name="👮 Moderator",
+            value=ctx.author.mention,
+            inline=False
+        )
+
+        embed.add_field(
+            name="🆔 Case",
+            value=f"#{case_id}",
             inline=True
         )
 
-        embed.set_footer(
-            text=f"Moderator: {ctx.author}"
-        )
 
         await ctx.send(
             embed=embed
         )
 
+
         await self.send_mod_log(
             ctx.guild,
+            case_id,
             "Unban",
+            user.id,
             ctx.author,
-            None,
-            f"User: {user} ({user.id})",
+            DEFAULT_REASON,
             discord.Color.green()
         )
 
-    # =====================================================
-    # PURGE
-    # =====================================================
+
+    # ======================================================
+    # !TIMEOUT
+    # ======================================================
 
     @commands.command()
-    @commands.has_permissions(manage_messages=True)
-    async def purge(
+    @commands.has_permissions(
+        moderate_members=True
+    )
+    async def timeout(
         self,
         ctx,
-        amount: int
+        member: discord.Member,
+        minutes: int,
+        *,
+        reason: str = DEFAULT_REASON
     ):
 
-        if amount < 1:
+        if minutes < 1:
 
             return await ctx.send(
-                "❌ Please enter at least 1 message."
+                "❌ Timeout duration must be at least 1 minute."
             )
 
-        if amount > 100:
+
+        if minutes > 40320:
 
             return await ctx.send(
-                "❌ You can delete a maximum of 100 messages at once."
+                "❌ Timeout duration cannot exceed 28 days."
             )
+
+
+        allowed, error = self.can_moderate(
+            ctx,
+            member
+        )
+
+        if not allowed:
+
+            return await ctx.send(
+                error
+            )
+
+
+        duration = timedelta(
+            minutes=minutes
+        )
+
+
+        case_id = self.create_case(
+            ctx.guild.id,
+            member.id,
+            ctx.author.id,
+            "Timeout",
+            reason
+        )
+
 
         try:
 
-            deleted = await ctx.channel.purge(
-                limit=amount + 1
+            await member.timeout(
+                duration,
+                reason=reason
             )
 
         except discord.Forbidden:
 
             return await ctx.send(
-                "❌ I don't have permission to delete messages."
+                "❌ I don't have permission to timeout that member."
             )
 
         except discord.HTTPException:
 
             return await ctx.send(
-                "❌ Discord rejected the purge request."
+                "❌ Discord rejected the timeout request."
             )
 
-        # The command itself is included in the purge.
 
-        deleted_count = max(
-            len(deleted) - 1,
-            0
+        embed = discord.Embed(
+            title="⏱️ Member Timed Out",
+            color=discord.Color.orange()
         )
 
-        confirmation = await ctx.send(
-            f"🧹 Deleted **{deleted_count}** messages."
+        embed.add_field(
+            name="👤 Member",
+            value=member.mention,
+            inline=True
         )
 
-        try:
+        embed.add_field(
+            name="⏱️ Duration",
+            value=f"{minutes} minute(s)",
+            inline=True
+        )
 
-            await confirmation.delete(
-                delay=5
-            )
+        embed.add_field(
+            name="🆔 Case",
+            value=f"#{case_id}",
+            inline=True
+        )
 
-        except discord.HTTPException:
-            pass
+        embed.add_field(
+            name="📝 Reason",
+            value=reason,
+            inline=False
+        )
+
+
+        await ctx.send(
+            embed=embed
+        )
+
 
         await self.send_mod_log(
             ctx.guild,
-            "Message Purge",
+            case_id,
+            "Timeout",
+            member.id,
             ctx.author,
-            None,
-            (
-                f"{deleted_count} messages deleted "
-                f"in {ctx.channel.mention}."
-            ),
+            reason,
             discord.Color.orange()
         )
 
-    # =====================================================
-    # MODERATION ERROR HANDLER
-    # =====================================================
 
-    async def handle_error(
+    # ======================================================
+    # !UNTIMEOUT
+    # ======================================================
+
+    @commands.command()
+    @commands.has_permissions(
+        moderate_members=True
+    )
+    async def untimeout(
+        self,
+        ctx,
+        member: discord.Member
+    ):
+
+        allowed, error = self.can_moderate(
+            ctx,
+            member
+        )
+
+        if not allowed:
+
+            return await ctx.send(
+                error
+            )
+
+
+        case_id = self.create_case(
+            ctx.guild.id,
+            member.id,
+            ctx.author.id,
+            "Remove Timeout",
+            DEFAULT_REASON
+        )
+
+
+        try:
+
+            await member.timeout(
+                None,
+                reason=f"Timeout removed by {ctx.author}"
+            )
+
+        except discord.Forbidden:
+
+            return await ctx.send(
+                "❌ I don't have permission to remove that timeout."
+            )
+
+        except discord.HTTPException:
+
+            return await ctx.send(
+                "❌ Discord rejected the request."
+            )
+
+
+        await ctx.send(
+            f"✅ Removed the timeout from "
+            f"{member.mention}. Case **#{case_id}**."
+        )
+
+
+        await self.send_mod_log(
+            ctx.guild,
+            case_id,
+            "Remove Timeout",
+            member.id,
+            ctx.author,
+            DEFAULT_REASON,
+            discord.Color.green()
+        )
+
+
+    # ======================================================
+    # !CASE
+    # ======================================================
+
+    @commands.command()
+    @commands.has_permissions(
+        moderate_members=True
+    )
+    async def case(
+        self,
+        ctx,
+        case_id: int
+    ):
+
+        if case_id < 1:
+
+            return await ctx.send(
+                "❌ Case ID must be 1 or higher."
+            )
+
+
+        case_data = self.get_case(
+            ctx.guild.id,
+            case_id
+        )
+
+
+        if case_data is None:
+
+            return await ctx.send(
+                f"❌ Case **#{case_id}** doesn't exist "
+                f"in this server."
+            )
+
+
+        user = ctx.guild.get_member(
+            case_data["user_id"]
+        )
+
+        moderator = ctx.guild.get_member(
+            case_data["moderator_id"]
+        )
+
+
+        user_text = (
+            user.mention
+            if user
+            else f"<@{case_data['user_id']}>"
+        )
+
+        moderator_text = (
+            moderator.mention
+            if moderator
+            else f"<@{case_data['moderator_id']}>"
+        )
+
+
+        embed = discord.Embed(
+            title=f"🛡️ Moderation Case #{case_id}",
+            color=EMBED_COLOR
+        )
+
+
+        embed.add_field(
+            name="👤 User",
+            value=user_text,
+            inline=True
+        )
+
+        embed.add_field(
+            name="🛡️ Action",
+            value=case_data["action"],
+            inline=True
+        )
+
+        embed.add_field(
+            name="👮 Moderator",
+            value=moderator_text,
+            inline=True
+        )
+
+        embed.add_field(
+            name="📝 Reason",
+            value=case_data["reason"],
+            inline=False
+        )
+
+        embed.add_field(
+            name="📅 Date",
+            value=str(case_data["created_at"]),
+            inline=False
+        )
+
+
+        await ctx.send(
+            embed=embed
+        )
+
+
+    # ======================================================
+    # !MODLOG
+    # ======================================================
+
+    @commands.command()
+    @commands.has_permissions(
+        manage_guild=True
+    )
+    async def modlog(
+        self,
+        ctx,
+        channel: discord.TextChannel
+    ):
+
+        self.update_setting(
+            ctx.guild.id,
+            "log_channel_id",
+            channel.id
+        )
+
+
+        embed = discord.Embed(
+            title="✅ Moderation Log Configured",
+            description=(
+                f"Moderation actions will now be logged in "
+                f"{channel.mention}."
+            ),
+            color=discord.Color.green()
+        )
+
+
+        await ctx.send(
+            embed=embed
+        )
+
+
+    # ======================================================
+    # !MODSETTINGS
+    # ======================================================
+
+    @commands.command()
+    @commands.has_permissions(
+        manage_guild=True
+    )
+    async def modsettings(
+        self,
+        ctx
+    ):
+
+        settings = self.get_settings(
+            ctx.guild.id
+        )
+
+
+        log_channel = None
+
+        if settings["log_channel_id"]:
+
+            log_channel = ctx.guild.get_channel(
+                settings["log_channel_id"]
+            )
+
+
+        embed = discord.Embed(
+            title="🛡️ Moderation Settings",
+            color=EMBED_COLOR
+        )
+
+
+        embed.add_field(
+            name="📜 Mod Log",
+            value=(
+                log_channel.mention
+                if log_channel
+                else "Not configured"
+            ),
+            inline=False
+        )
+
+
+        timeout_count = (
+            settings["timeout_warning_count"]
+            or 0
+        )
+
+        kick_count = (
+            settings["kick_warning_count"]
+            or 0
+        )
+
+        ban_count = (
+            settings["ban_warning_count"]
+            or 0
+        )
+
+
+        embed.add_field(
+            name="⏱️ Timeout",
+            value=(
+                f"{timeout_count} warnings"
+                if timeout_count
+                else "Disabled"
+            ),
+            inline=True
+        )
+
+
+        embed.add_field(
+            name="👢 Kick",
+            value=(
+                f"{kick_count} warnings"
+                if kick_count
+                else "Disabled"
+            ),
+            inline=True
+        )
+
+
+        embed.add_field(
+            name="🔨 Ban",
+            value=(
+                f"{ban_count} warnings"
+                if ban_count
+                else "Disabled"
+            ),
+            inline=True
+        )
+
+
+        embed.add_field(
+            name="⚙️ Configuration",
+            value=(
+                "`!modlog #channel`\n"
+                "`!setpunishment <warnings> timeout`\n"
+                "`!setpunishment <warnings> kick`\n"
+                "`!setpunishment <warnings> ban`"
+            ),
+            inline=False
+        )
+
+
+        await ctx.send(
+            embed=embed
+        )
+
+
+    # ======================================================
+    # !SETPUNISHMENT
+    # ======================================================
+
+    @commands.command()
+    @commands.has_permissions(
+        administrator=True
+    )
+    async def setpunishment(
+        self,
+        ctx,
+        warning_count: int,
+        action: str
+    ):
+
+        if warning_count < 0:
+
+            return await ctx.send(
+                "❌ Warning count cannot be negative."
+            )
+
+
+        action = action.lower()
+
+
+        allowed_actions = {
+            "timeout",
+            "kick",
+            "ban"
+        }
+
+
+        if action not in allowed_actions:
+
+            return await ctx.send(
+                "❌ Action must be `timeout`, `kick`, or `ban`."
+            )
+
+
+        column_map = {
+            "timeout": "timeout_warning_count",
+            "kick": "kick_warning_count",
+            "ban": "ban_warning_count"
+        }
+
+
+        self.update_setting(
+            ctx.guild.id,
+            column_map[action],
+            warning_count
+        )
+
+
+        if warning_count == 0:
+
+            return await ctx.send(
+                f"✅ Automatic **{action}** escalation "
+                f"has been disabled."
+            )
+
+
+        await ctx.send(
+            f"✅ Members will automatically receive a "
+            f"**{action}** after **{warning_count} warnings**."
+        )
+
+
+    # ======================================================
+    # !MODERATIONHELP
+    # ======================================================
+
+    @commands.command(
+        aliases=["modhelp"]
+    )
+    async def moderationhelp(
+        self,
+        ctx
+    ):
+
+        embed = discord.Embed(
+            title="🛡️ Grid Guardian Moderation",
+            description=(
+                "Advanced server moderation commands."
+            ),
+            color=EMBED_COLOR
+        )
+
+
+        embed.add_field(
+            name="⚠️ Warnings",
+            value=(
+                "`!warn @user <reason>`\n"
+                "`!warnings @user`\n"
+                "`!clearwarnings @user`"
+            ),
+            inline=False
+        )
+
+
+        embed.add_field(
+            name="🔨 Moderation",
+            value=(
+                "`!kick @user <reason>`\n"
+                "`!ban @user <reason>`\n"
+                "`!unban <user_id>`\n"
+                "`!timeout @user <minutes> <reason>`\n"
+                "`!untimeout @user`"
+            ),
+            inline=False
+        )
+
+
+        embed.add_field(
+            name="📋 Cases",
+            value=(
+                "`!case <case_id>`"
+            ),
+            inline=False
+        )
+
+
+        embed.add_field(
+            name="⚙️ Configuration",
+            value=(
+                "`!modlog #channel`\n"
+                "`!modsettings`\n"
+                "`!setpunishment <warnings> <action>`"
+            ),
+            inline=False
+        )
+
+
+        embed.set_footer(
+            text="Grid Guardian • Moderation"
+        )
+
+
+        await ctx.send(
+            embed=embed
+        )
+
+
+    # ======================================================
+    # COMMAND ERROR HANDLERS
+    # ======================================================
+
+    @warn.error
+    async def warn_error(
         self,
         ctx,
         error
     ):
-
-        # -------------------------------------------------
-        # UNWRAP COMMAND INVOCATION ERROR
-        # -------------------------------------------------
-
-        if isinstance(
-            error,
-            commands.CommandInvokeError
-        ):
-
-            error = error.original
-
-        # -------------------------------------------------
-        # MISSING PERMISSIONS
-        # -------------------------------------------------
 
         if isinstance(
             error,
             commands.MissingPermissions
         ):
 
-            return await ctx.send(
-                "❌ You don't have permission to use that command."
+            await ctx.send(
+                "❌ You need the **Moderate Members** "
+                "permission to warn members."
             )
 
-        # -------------------------------------------------
-        # MISSING ARGUMENT
-        # -------------------------------------------------
-
-        if isinstance(
+        elif isinstance(
             error,
             commands.MissingRequiredArgument
         ):
 
-            return await ctx.send(
-                "❌ You're missing a required argument.\n"
-                f"Use `{ctx.prefix}help {ctx.command}` "
-                "to see how to use this command."
+            await ctx.send(
+                "❌ Usage: `!warn @user <reason>`"
             )
 
-        # -------------------------------------------------
-        # MEMBER NOT FOUND
-        # -------------------------------------------------
-
-        if isinstance(
+        elif isinstance(
             error,
             commands.MemberNotFound
         ):
 
-            return await ctx.send(
-                "❌ I couldn't find that member.\n"
-                "Try mentioning them or using their exact ID."
+            await ctx.send(
+                "❌ I couldn't find that member."
             )
 
-        # -------------------------------------------------
-        # USER NOT FOUND
-        # -------------------------------------------------
-
-        if isinstance(
-            error,
-            commands.UserNotFound
-        ):
-
-            return await ctx.send(
-                "❌ I couldn't find that user."
-            )
-
-        # -------------------------------------------------
-        # INVALID INTEGER
-        # -------------------------------------------------
-
-        if isinstance(
-            error,
-            commands.BadArgument
-        ):
-
-            return await ctx.send(
-                "❌ One of the arguments you entered is invalid."
-            )
-
-        # -------------------------------------------------
-        # EVERYTHING ELSE
-        # -------------------------------------------------
-
-        raise error
-
-    # =====================================================
-    # INDIVIDUAL COMMAND ERROR HOOKS
-    # =====================================================
-
-    @warn.error
-    async def warn_error(self, ctx, error):
-        await self.handle_error(ctx, error)
 
     @warnings.error
-    async def warnings_error(self, ctx, error):
-        await self.handle_error(ctx, error)
+    async def warnings_error(
+        self,
+        ctx,
+        error
+    ):
+
+        if isinstance(
+            error,
+            commands.MissingPermissions
+        ):
+
+            await ctx.send(
+                "❌ You need the **Moderate Members** "
+                "permission to view warnings."
+            )
+
+        elif isinstance(
+            error,
+            commands.MissingRequiredArgument
+        ):
+
+            await ctx.send(
+                "❌ Usage: `!warnings @user`"
+            )
+
 
     @clearwarnings.error
-    async def clearwarnings_error(self, ctx, error):
-        await self.handle_error(ctx, error)
+    async def clearwarnings_error(
+        self,
+        ctx,
+        error
+    ):
 
-    @timeout.error
-    async def timeout_error(self, ctx, error):
-        await self.handle_error(ctx, error)
+        if isinstance(
+            error,
+            commands.MissingPermissions
+        ):
 
-    @untimeout.error
-    async def untimeout_error(self, ctx, error):
-        await self.handle_error(ctx, error)
-
-    @kick.error
-    async def kick_error(self, ctx, error):
-        await self.handle_error(ctx, error)
-
-    @ban.error
-    async def ban_error(self, ctx, error):
-        await self.handle_error(ctx, error)
-
-    @unban.error
-    async def unban_error(self, ctx, error):
-        await self.handle_error(ctx, error)
-
-    @purge.error
-    async def purge_error(self, ctx, error):
-        await self.handle_error(ctx, error)
+            await ctx.send(
+                "❌ You need **Manage Server** permission "
+                "to clear warnings."
+            )
 
 
-# =========================================================
+    @setpunishment.error
+    async def setpunishment_error(
+        self,
+        ctx,
+        error
+    ):
+
+        if isinstance(
+            error,
+            commands.MissingPermissions
+        ):
+
+            await ctx.send(
+                "❌ You need **Administrator** permission "
+                "to configure punishments."
+            )
+
+        elif isinstance(
+            error,
+            commands.MissingRequiredArgument
+        ):
+
+            await ctx.send(
+                "❌ Usage: `!setpunishment <warnings> <action>`"
+            )
+
+
+# ==========================================================
 # SETUP
-# =========================================================
+# ==========================================================
 
 async def setup(bot):
 

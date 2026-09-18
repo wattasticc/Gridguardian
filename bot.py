@@ -435,6 +435,10 @@ async def load_cogs():
     await bot.load_extension("cogs.loadout")
     print("⚡ Loadout System Loaded")
 
+    print("Loading Wattson Setup Library...")
+    await bot.load_extension("cogs.setups")
+    print("⚡ Wattson Setup Library Loaded")
+
     print("Loading Legends...")
     await bot.load_extension("cogs.legends")
     print("✅ Legends Loaded")

@@ -1,185 +1,613 @@
 import sqlite3
+from typing import Optional
+
 import discord
 from discord.ext import commands
 
-EMBED_COLOR = discord.Color.from_rgb(80, 220, 255)
 
-db = sqlite3.connect("gridguardian.db")
-cursor = db.cursor()
+DB_PATH = "gridguardian.db"
+EMBED_COLOR = discord.Color.blurple()
 
 
 class Profile(commands.Cog):
-    def __init__(self, bot):
+    """Grid Guardian member profile system."""
+
+    def __init__(self, bot: commands.Bot):
         self.bot = bot
 
-    @commands.command()
-    async def profile(self, ctx, member: discord.Member = None):
+    # ============================================================
+    # DATABASE
+    # ============================================================
 
-        if member is None:
-            member = ctx.author
+    def db_connect(self):
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        return conn
 
-        # -------------------------
-        # LEVEL
-        # -------------------------
+    # ============================================================
+    # DATABASE HELPERS
+    # ============================================================
 
-        cursor.execute(
-            "SELECT level, xp FROM levels WHERE user_id=?",
-            (member.id,)
-        )
-
-        data = cursor.fetchone()
-
-        if data:
-            level, xp = data
-        else:
-            level = 1
-            xp = 0
-
-        xp_needed = level * 100
-
-        # Progress Bar
-        percent = min(int((xp / xp_needed) * 10), 10)
-        bar = "█" * percent + "░" * (10 - percent)
-
-        # -------------------------
-        # ECONOMY
-        # -------------------------
-
-        balance = 0
+    def get_level_data(
+        self,
+        user_id: int
+    ):
+        conn = self.db_connect()
+        cursor = conn.cursor()
 
         try:
             cursor.execute(
-                "SELECT balance FROM economy WHERE user_id=?",
-                (member.id,)
+                """
+                SELECT xp, level
+                FROM levels
+                WHERE user_id = ?
+                """,
+                (user_id,)
             )
 
-            data = cursor.fetchone()
+            row = cursor.fetchone()
 
-            if data:
-                balance = data[0]
+        except sqlite3.OperationalError:
+            row = None
 
-        except:
-            pass
+        conn.close()
 
-        # -------------------------
-        # ACHIEVEMENTS
-        # -------------------------
+        return row
 
-        achievements = 0
+    def get_mastery_data(
+        self,
+        guild_id: int,
+        user_id: int
+    ):
+        conn = self.db_connect()
+        cursor = conn.cursor()
 
         try:
-            cursor.execute("""
-            SELECT COUNT(*)
-            FROM achievements
-            WHERE user_id=?
-            """, (member.id,))
+            cursor.execute(
+                """
+                SELECT xp, level
+                FROM wattson_mastery
+                WHERE guild_id = ?
+                  AND user_id = ?
+                """,
+                (
+                    guild_id,
+                    user_id
+                )
+            )
 
-            achievements = cursor.fetchone()[0]
+            row = cursor.fetchone()
 
-        except:
-            pass
+        except sqlite3.OperationalError:
+            row = None
 
-        # -------------------------
-        # SERVER RANK
-        # -------------------------
+        conn.close()
 
-        cursor.execute("""
-        SELECT user_id
-        FROM levels
-        ORDER BY level DESC, xp DESC
-        """)
+        return row
 
-        leaderboard = cursor.fetchall()
+    def get_setup_data(
+        self,
+        guild_id: int,
+        user_id: int
+    ):
+        conn = self.db_connect()
+        cursor = conn.cursor()
 
-        rank = "Unranked"
+        try:
+            cursor.execute(
+                """
+                SELECT
+                    COUNT(*) AS setup_count,
+                    COALESCE(SUM(upvotes), 0) AS upvotes
+                FROM wattson_setups
+                WHERE guild_id = ?
+                  AND user_id = ?
+                """,
+                (
+                    guild_id,
+                    user_id
+                )
+            )
 
-        for i, user in enumerate(leaderboard):
+            row = cursor.fetchone()
 
-            if user[0] == member.id:
-                rank = f"#{i + 1}"
-                break
+        except sqlite3.OperationalError:
+            row = None
 
-        # -------------------------
-        # ROLES
-        # -------------------------
+        conn.close()
 
-        roles = [
-            role.mention
-            for role in member.roles
-            if role.name != "@everyone"
+        return row
+
+    def get_challenge_xp(
+        self,
+        guild_id: int,
+        user_id: int
+    ):
+        conn = self.db_connect()
+        cursor = conn.cursor()
+
+        try:
+            cursor.execute(
+                """
+                SELECT total_xp
+                FROM challenge_rewards
+                WHERE guild_id = ?
+                  AND user_id = ?
+                """,
+                (
+                    guild_id,
+                    user_id
+                )
+            )
+
+            row = cursor.fetchone()
+
+        except sqlite3.OperationalError:
+            row = None
+
+        conn.close()
+
+        if not row:
+            return 0
+
+        return row["total_xp"]
+
+    def get_achievement_count(
+        self,
+        user_id: int
+    ):
+        conn = self.db_connect()
+        cursor = conn.cursor()
+
+        try:
+            cursor.execute(
+                """
+                SELECT COUNT(*) AS count
+                FROM achievements
+                WHERE user_id = ?
+                """,
+                (user_id,)
+            )
+
+            row = cursor.fetchone()
+
+        except sqlite3.OperationalError:
+            row = None
+
+        conn.close()
+
+        if not row:
+            return 0
+
+        return row["count"]
+
+    # ============================================================
+    # RANK HELPERS
+    # ============================================================
+
+    def get_level_rank(
+        self,
+        user_id: int
+    ):
+        conn = self.db_connect()
+        cursor = conn.cursor()
+
+        try:
+            cursor.execute(
+                """
+                SELECT user_id
+                FROM levels
+                ORDER BY level DESC, xp DESC
+                """
+            )
+
+            rows = cursor.fetchall()
+
+        except sqlite3.OperationalError:
+            conn.close()
+            return None
+
+        conn.close()
+
+        for index, row in enumerate(rows, start=1):
+            if row["user_id"] == user_id:
+                return index
+
+        return None
+
+    def get_mastery_rank(
+        self,
+        guild_id: int,
+        user_id: int
+    ):
+        conn = self.db_connect()
+        cursor = conn.cursor()
+
+        try:
+            cursor.execute(
+                """
+                SELECT user_id
+                FROM wattson_mastery
+                WHERE guild_id = ?
+                ORDER BY level DESC, xp DESC
+                """,
+                (guild_id,)
+            )
+
+            rows = cursor.fetchall()
+
+        except sqlite3.OperationalError:
+            conn.close()
+            return None
+
+        conn.close()
+
+        for index, row in enumerate(rows, start=1):
+            if row["user_id"] == user_id:
+                return index
+
+        return None
+
+    def get_setup_rank(
+        self,
+        guild_id: int,
+        user_id: int
+    ):
+        conn = self.db_connect()
+        cursor = conn.cursor()
+
+        try:
+            cursor.execute(
+                """
+                SELECT user_id
+                FROM wattson_setups
+                WHERE guild_id = ?
+                GROUP BY user_id
+                ORDER BY
+                    COALESCE(SUM(upvotes), 0) DESC,
+                    COUNT(*) DESC
+                """,
+                (guild_id,)
+            )
+
+            rows = cursor.fetchall()
+
+        except sqlite3.OperationalError:
+            conn.close()
+            return None
+
+        conn.close()
+
+        for index, row in enumerate(rows, start=1):
+            if row["user_id"] == user_id:
+                return index
+
+        return None
+
+    # ============================================================
+    # TITLES
+    # ============================================================
+
+    def get_mastery_title(
+        self,
+        level: int
+    ):
+        titles = [
+            (100, "⚡ Master of the Grid"),
+            (75, "⚡ Grid Legend"),
+            (50, "⚡ Power Grid Master"),
+            (30, "⚡ Electrical Expert"),
+            (20, "⚡ Grid Commander"),
+            (10, "⚡ Fence Specialist"),
+            (5, "⚡ Junior Engineer"),
+            (1, "⚡ Grid Recruit"),
         ]
 
-        role_text = ", ".join(roles[:8])
+        for required_level, title in titles:
+            if level >= required_level:
+                return title
 
-        if not role_text:
-            role_text = "None"
+        return "⚡ Grid Recruit"
 
-        # -------------------------
-        # EMBED
-        # -------------------------
+    # ============================================================
+    # PROFILE EMBED
+    # ============================================================
 
-        embed = discord.Embed(
-            title="⚡ Grid Guardian Profile",
-            color=EMBED_COLOR
+    def build_profile_embed(
+        self,
+        member: discord.Member,
+        level_data,
+        mastery_data,
+        setup_data,
+        challenge_xp,
+        achievement_count,
+        level_rank,
+        mastery_rank,
+        setup_rank
+    ):
+        level = (
+            level_data["level"]
+            if level_data
+            else 1
         )
 
-        embed.set_author(
-            name=member.display_name,
-            icon_url=member.display_avatar.url
+        level_xp = (
+            level_data["xp"]
+            if level_data
+            else 0
+        )
+
+        mastery_level = (
+            mastery_data["level"]
+            if mastery_data
+            else 1
+        )
+
+        mastery_xp = (
+            mastery_data["xp"]
+            if mastery_data
+            else 0
+        )
+
+        setup_count = (
+            setup_data["setup_count"]
+            if setup_data
+            else 0
+        )
+
+        upvotes = (
+            setup_data["upvotes"]
+            if setup_data
+            else 0
+        )
+
+        mastery_title = self.get_mastery_title(
+            mastery_level
+        )
+
+        embed = discord.Embed(
+            title=f"⚡ {member.display_name}",
+            description=mastery_title,
+            color=EMBED_COLOR
         )
 
         embed.set_thumbnail(
             url=member.display_avatar.url
         )
 
+        # --------------------------------------------------------
+        # LEVEL
+        # --------------------------------------------------------
+
+        level_rank_text = (
+            f"#{level_rank}"
+            if level_rank
+            else "Unranked"
+        )
+
         embed.add_field(
-            name="⭐ Level",
-            value=level,
+            name="📈 Server Level",
+            value=(
+                f"**Level:** {level}\n"
+                f"**XP:** {level_xp:,}\n"
+                f"**Rank:** {level_rank_text}"
+            ),
             inline=True
         )
 
+        # --------------------------------------------------------
+        # WATTSON MASTERY
+        # --------------------------------------------------------
+
+        mastery_rank_text = (
+            f"#{mastery_rank}"
+            if mastery_rank
+            else "Unranked"
+        )
+
         embed.add_field(
-            name="🏆 Rank",
-            value=rank,
+            name="⚡ Wattson Mastery",
+            value=(
+                f"**Level:** {mastery_level}\n"
+                f"**XP:** {mastery_xp:,}\n"
+                f"**Rank:** {mastery_rank_text}"
+            ),
             inline=True
         )
 
+        # --------------------------------------------------------
+        # SETUPS
+        # --------------------------------------------------------
+
+        setup_rank_text = (
+            f"#{setup_rank}"
+            if setup_rank
+            else "Unranked"
+        )
+
         embed.add_field(
-            name="💰 Coins",
-            value=f"{balance:,}",
+            name="🧠 Setup Library",
+            value=(
+                f"**Setups:** {setup_count:,}\n"
+                f"**Upvotes:** {upvotes:,}\n"
+                f"**Rank:** {setup_rank_text}"
+            ),
             inline=True
         )
 
-        embed.add_field(
-            name="⚡ XP Progress",
-            value=f"{bar}\n{xp}/{xp_needed}",
-            inline=False
-        )
+        # --------------------------------------------------------
+        # ACHIEVEMENTS
+        # --------------------------------------------------------
 
         embed.add_field(
-            name="🏅 Achievements",
-            value=f"{achievements} Unlocked",
+            name="🏆 Achievements",
+            value=(
+                f"**Unlocked:** "
+                f"{achievement_count:,}"
+            ),
             inline=True
         )
 
+        # --------------------------------------------------------
+        # CHALLENGES
+        # --------------------------------------------------------
+
         embed.add_field(
-            name="📅 Joined",
-            value=member.joined_at.strftime("%b %d, %Y"),
+            name="🎯 Challenge XP",
+            value=(
+                f"**Earned:** "
+                f"{challenge_xp:,} XP"
+            ),
             inline=True
         )
 
+        # --------------------------------------------------------
+        # MEMBER
+        # --------------------------------------------------------
+
+        joined_text = (
+            discord.utils.format_dt(
+                member.joined_at,
+                style="D"
+            )
+            if member.joined_at
+            else "Unknown"
+        )
+
         embed.add_field(
-            name="🎭 Roles",
-            value=role_text,
-            inline=False
+            name="👤 Member",
+            value=(
+                f"**Joined:** {joined_text}\n"
+                f"**ID:** `{member.id}`"
+            ),
+            inline=True
         )
 
         embed.set_footer(
-            text=f"User ID • {member.id}"
+            text="Grid Guardian • Member Profile"
         )
 
-        await ctx.send(embed=embed)
+        return embed
+
+    # ============================================================
+    # PROFILE COMMAND
+    # ============================================================
+
+    @commands.command(
+        name="profile",
+        aliases=[
+            "p",
+            "me",
+            "card"
+        ]
+    )
+    @commands.guild_only()
+    async def profile(
+        self,
+        ctx: commands.Context,
+        member: Optional[discord.Member] = None
+    ):
+        """Display a Grid Guardian profile."""
+
+        member = member or ctx.author
+
+        user_id = member.id
+        guild_id = ctx.guild.id
+
+        level_data = self.get_level_data(
+            user_id
+        )
+
+        mastery_data = self.get_mastery_data(
+            guild_id,
+            user_id
+        )
+
+        setup_data = self.get_setup_data(
+            guild_id,
+            user_id
+        )
+
+        challenge_xp = self.get_challenge_xp(
+            guild_id,
+            user_id
+        )
+
+        achievement_count = self.get_achievement_count(
+            user_id
+        )
+
+        level_rank = self.get_level_rank(
+            user_id
+        )
+
+        mastery_rank = self.get_mastery_rank(
+            guild_id,
+            user_id
+        )
+
+        setup_rank = self.get_setup_rank(
+            guild_id,
+            user_id
+        )
+
+        embed = self.build_profile_embed(
+            member,
+            level_data,
+            mastery_data,
+            setup_data,
+            challenge_xp,
+            achievement_count,
+            level_rank,
+            mastery_rank,
+            setup_rank
+        )
+
+        await ctx.send(
+            embed=embed
+        )
+
+    # ============================================================
+    # PROFILE HELP
+    # ============================================================
+
+    @commands.command(
+        name="profilehelp"
+    )
+    @commands.guild_only()
+    async def profile_help(
+        self,
+        ctx: commands.Context
+    ):
+        embed = discord.Embed(
+            title="⚡ Profile Commands",
+            description=(
+                "`!profile` — View your profile\n"
+                "`!profile @user` — View another member's profile\n"
+                "`!p` — Profile shortcut\n"
+                "`!me` — Profile shortcut\n"
+                "`!card` — Profile shortcut"
+            ),
+            color=EMBED_COLOR
+        )
+
+        embed.add_field(
+            name="Profile Includes",
+            value=(
+                "📈 Server Level\n"
+                "⚡ Wattson Mastery\n"
+                "🧠 Setup Library stats\n"
+                "🎯 Challenge XP\n"
+                "🏆 Achievements\n"
+                "📊 Server ranks"
+            ),
+            inline=False
+        )
+
+        await ctx.send(
+            embed=embed
+        )
 
 
-async def setup(bot):
+async def setup(bot: commands.Bot):
     await bot.add_cog(Profile(bot))
