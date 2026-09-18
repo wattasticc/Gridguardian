@@ -335,10 +335,6 @@ async def load_cogs():
     await bot.load_extension("cogs.apexpatch")
     print("🔴 Apex Patch Loaded")
 
-    print("Loading Mastery Rewards...")
-    await bot.load_extension("cogs.masteryrewards")
-    print("⚡ Mastery Rewards Loaded")
-
     print("Loading Wattson Mastery...")
     await bot.load_extension("cogs.wattsonmastery")
     print("⚡ Wattson Mastery Loaded")
