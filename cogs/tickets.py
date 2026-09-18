@@ -1,1638 +1,471 @@
 import io
+import re
 import sqlite3
 from datetime import datetime, timezone
 
 import discord
 from discord.ext import commands
 
-
+DB_PATH = "gridguardian.db"
 EMBED_COLOR = discord.Color.from_rgb(80, 220, 255)
+DEPARTMENTS = {
+    "general": ("General Support", "🛠️", "General questions and community support."),
+    "bug": ("Report a Bug", "🐛", "Report a bot, server, or feature bug."),
+    "partnership": ("Partnership", "🤝", "Partnership and collaboration requests."),
+    "report": ("Report a Player/User", "🚨", "Report a player or community user."),
+}
 
 
-# =========================================================
-# DATABASE
-# =========================================================
-
-db = sqlite3.connect("gridguardian.db")
-cursor = db.cursor()
-
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS settings (
-    guild_id INTEGER PRIMARY KEY,
-    welcome_channel_id INTEGER,
-    log_channel_id INTEGER,
-    suggestion_channel_id INTEGER,
-    autorole_id INTEGER,
-    ticket_category_id INTEGER
-)
-""")
-
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS tickets (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    guild_id INTEGER NOT NULL,
-    user_id INTEGER NOT NULL,
-    channel_id INTEGER NOT NULL,
-    department TEXT DEFAULT 'General Support',
-    status TEXT DEFAULT 'open',
-    claimed_by INTEGER,
-    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    closed_at DATETIME
-)
-""")
-
-db.commit()
+def db():
+    c = sqlite3.connect(DB_PATH, timeout=10)
+    c.row_factory = sqlite3.Row
+    return c
 
 
-# =========================================================
-# DATABASE COMPATIBILITY
-# =========================================================
-
-def ensure_column(table, column, definition):
-
-    cursor.execute(f"PRAGMA table_info({table})")
-
-    columns = [
-        row[1]
-        for row in cursor.fetchall()
-    ]
-
-    if column not in columns:
-
-        cursor.execute(
-            f"ALTER TABLE {table} "
-            f"ADD COLUMN {column} {definition}"
-        )
-
-        db.commit()
+def ensure_column(c, table, column, definition):
+    cols = {r[1] for r in c.execute(f"PRAGMA table_info({table})")}
+    if column not in cols:
+        c.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
 
 
-ensure_column(
-    "tickets",
-    "department",
-    "TEXT DEFAULT 'General Support'"
-)
-
-ensure_column(
-    "tickets",
-    "claimed_by",
-    "INTEGER"
-)
-
-
-# =========================================================
-# HELPER FUNCTIONS
-# =========================================================
-
-def get_ticket_category(guild):
-
-    cursor.execute("""
-    SELECT ticket_category_id
-    FROM settings
-    WHERE guild_id=?
-    """, (guild.id,))
-
-    result = cursor.fetchone()
-
-    if result and result[0]:
-
-        category = guild.get_channel(
-            result[0]
-        )
-
-        if isinstance(
-            category,
-            discord.CategoryChannel
-        ):
-            return category
-
-    return None
+def init_db():
+    with db() as c:
+        c.execute("""CREATE TABLE IF NOT EXISTS settings (
+            guild_id INTEGER PRIMARY KEY, welcome_channel_id INTEGER,
+            log_channel_id INTEGER, suggestion_channel_id INTEGER,
+            autorole_id INTEGER, ticket_category_id INTEGER)""")
+        ensure_column(c, "settings", "ticket_category_id", "INTEGER")
+        c.execute("""CREATE TABLE IF NOT EXISTS tickets (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, guild_id INTEGER NOT NULL,
+            user_id INTEGER NOT NULL, channel_id INTEGER NOT NULL,
+            department TEXT NOT NULL DEFAULT 'general',
+            status TEXT NOT NULL DEFAULT 'open', claimed_by INTEGER,
+            created_at TEXT NOT NULL, closed_at TEXT)""")
+        ensure_column(c, "tickets", "department", "TEXT NOT NULL DEFAULT 'general'")
+        ensure_column(c, "tickets", "claimed_by", "INTEGER")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_ticket_user ON tickets(guild_id,user_id,status)")
+        c.execute("CREATE INDEX IF NOT EXISTS idx_ticket_channel ON tickets(channel_id)")
 
 
-def get_open_ticket(
-    guild_id,
-    user_id
-):
-
-    cursor.execute("""
-    SELECT id, channel_id
-    FROM tickets
-    WHERE guild_id=?
-    AND user_id=?
-    AND status='open'
-    """, (
-        guild_id,
-        user_id
-    ))
-
-    return cursor.fetchone()
+def setting(guild_id):
+    with db() as c:
+        r = c.execute("SELECT ticket_category_id FROM settings WHERE guild_id=?", (guild_id,)).fetchone()
+        return r[0] if r else None
 
 
-def get_ticket(channel_id):
-
-    cursor.execute("""
-    SELECT
-        id,
-        guild_id,
-        user_id,
-        channel_id,
-        department,
-        status,
-        claimed_by,
-        created_at,
-        closed_at
-    FROM tickets
-    WHERE channel_id=?
-    """, (channel_id,))
-
-    return cursor.fetchone()
+def set_setting(guild_id, category_id):
+    with db() as c:
+        c.execute("""INSERT INTO settings(guild_id,ticket_category_id) VALUES(?,?)
+        ON CONFLICT(guild_id) DO UPDATE SET ticket_category_id=excluded.ticket_category_id""", (guild_id, category_id))
 
 
-def is_staff(member):
-
-    return (
-        member.guild_permissions.manage_guild
-        or member.guild_permissions.administrator
-    )
+def ticket_channel(channel_id):
+    with db() as c:
+        return c.execute("SELECT * FROM tickets WHERE channel_id=? LIMIT 1", (channel_id,)).fetchone()
 
 
-async def send_ticket_log(
-    guild,
-    title,
-    description,
-    color
-):
+def open_ticket(guild_id, user_id):
+    with db() as c:
+        return c.execute("""SELECT * FROM tickets WHERE guild_id=? AND user_id=? AND status='open'
+        ORDER BY id DESC LIMIT 1""", (guild_id, user_id)).fetchone()
 
-    cursor.execute("""
-    SELECT log_channel_id
-    FROM settings
-    WHERE guild_id=?
-    """, (guild.id,))
 
-    result = cursor.fetchone()
+def by_id(ticket_id, guild_id=None):
+    with db() as c:
+        if guild_id is None:
+            return c.execute("SELECT * FROM tickets WHERE id=?", (ticket_id,)).fetchone()
+        return c.execute("SELECT * FROM tickets WHERE id=? AND guild_id=?", (ticket_id, guild_id)).fetchone()
 
-    if not result or not result[0]:
+
+def update(ticket_id, **fields):
+    allowed = {"status", "claimed_by", "closed_at", "department", "channel_id"}
+    fields = {k: v for k, v in fields.items() if k in allowed}
+    if not fields:
         return
+    with db() as c:
+        c.execute(f"UPDATE tickets SET {', '.join(k+'=?' for k in fields)} WHERE id=?", (*fields.values(), ticket_id))
 
-    log_channel = guild.get_channel(
-        result[0]
-    )
 
-    if not isinstance(
-        log_channel,
-        discord.TextChannel
-    ):
+def staff(m):
+    return m.guild_permissions.manage_guild or m.guild_permissions.administrator
+
+
+def panel_embed():
+    e = discord.Embed(title="🎫 Grid Guardian Support", color=EMBED_COLOR,
+                      description="Select a department below to open a ticket. Please provide clear details and any useful screenshots, videos, or IDs.")
+    for key, (label, emoji, desc) in DEPARTMENTS.items():
+        e.add_field(name=f"{emoji} {label}", value=desc, inline=False)
+    e.set_footer(text="Grid Guardian • Support System")
+    return e
+
+
+def ticket_embed(t, member):
+    label, emoji, _ = DEPARTMENTS.get(t["department"], DEPARTMENTS["general"])
+    e = discord.Embed(title=f"{emoji} {label}", color=EMBED_COLOR,
+                      description=f"Welcome {member.mention}!\n\nPlease describe your issue clearly. Staff can claim this ticket, and the owner or staff can close it.")
+    e.add_field(name="🎫 Ticket", value=f"`#{t['id']}`", inline=True)
+    e.add_field(name="📂 Department", value=label, inline=True)
+    e.add_field(name="👤 Owner", value=f"<@{t['user_id']}>", inline=True)
+    e.add_field(name="📌 Status", value=t["status"].title(), inline=True)
+    e.add_field(name="🙋 Claimed By", value=f"<@{t['claimed_by']}>" if t["claimed_by"] else "Unclaimed", inline=True)
+    return e
+
+
+async def log(guild, title, text, color=EMBED_COLOR):
+    with db() as c:
+        r = c.execute("SELECT log_channel_id FROM settings WHERE guild_id=?", (guild.id,)).fetchone()
+    channel = guild.get_channel(r[0]) if r and r[0] else None
+    if not isinstance(channel, discord.TextChannel):
         return
-
-    embed = discord.Embed(
-        title=title,
-        description=description,
-        color=color,
-        timestamp=datetime.now(timezone.utc)
-    )
-
+    e = discord.Embed(title=title, description=text, color=color, timestamp=datetime.now(timezone.utc))
     try:
-
-        await log_channel.send(
-            embed=embed
-        )
-
-    except discord.HTTPException:
+        await channel.send(embed=e)
+    except (discord.Forbidden, discord.HTTPException):
         pass
 
 
-async def create_transcript(channel):
-
-    lines = []
-
-    async for message in channel.history(
-        limit=None,
-        oldest_first=True
-    ):
-
-        timestamp = message.created_at.strftime(
-            "%Y-%m-%d %H:%M:%S UTC"
-        )
-
-        author = (
-            f"{message.author} "
-            f"({message.author.id})"
-        )
-
-        content = message.content
-
-        if not content:
-            content = "[No text content]"
-
-        if message.attachments:
-
-            attachment_urls = ", ".join(
-                attachment.url
-                for attachment
-                in message.attachments
-            )
-
-            content += (
-                "\nAttachments: "
-                f"{attachment_urls}"
-            )
-
-        lines.append(
-            f"[{timestamp}] "
-            f"{author}: "
-            f"{content}"
-        )
-
-    if not lines:
-
-        lines.append(
-            "No messages found in this ticket."
-        )
-
-    return "\n".join(lines)
+async def transcript(channel):
+    lines = [f"Grid Guardian Ticket Transcript", f"Guild: {channel.guild.name} ({channel.guild.id})",
+             f"Channel: {channel.name} ({channel.id})", f"Generated: {datetime.now(timezone.utc).isoformat()}", "=" * 80, ""]
+    try:
+        async for m in channel.history(limit=None, oldest_first=True):
+            lines += [f"[{m.created_at.isoformat()}] {m.author} ({m.author.id})", m.content or "[no text content]"]
+            lines += [f"Attachment: {a.url}" for a in m.attachments]
+            lines.append("-" * 80)
+    except discord.HTTPException as exc:
+        lines.append(f"History error: {exc}")
+    data = "\n".join(lines).encode("utf-8", "replace")
+    if len(data) > 24 * 1024 * 1024:
+        data = data[:24 * 1024 * 1024] + b"\n[Transcript truncated.]"
+    return io.BytesIO(data)
 
 
-# =========================================================
-# TICKET ACTION VIEW
-# =========================================================
+async def category(guild):
+    cid = setting(guild.id)
+    if cid:
+        c = guild.get_channel(cid)
+        if isinstance(c, discord.CategoryChannel):
+            return c
+    c = discord.utils.get(guild.categories, name="Tickets")
+    if not c:
+        try:
+            c = await guild.create_category("Tickets", reason="Grid Guardian ticket system")
+        except (discord.Forbidden, discord.HTTPException):
+            return None
+    set_setting(guild.id, c.id)
+    return c
+
+
+def overwrites(guild, user):
+    ow = {guild.default_role: discord.PermissionOverwrite(view_channel=False),
+          user: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True, attach_files=True, embed_links=True)}
+    if guild.me:
+        ow[guild.me] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True, manage_channels=True, manage_messages=True, attach_files=True, embed_links=True)
+    for role in guild.roles:
+        if not role.is_default() and (role.permissions.administrator or role.permissions.manage_guild):
+            ow[role] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True, attach_files=True, embed_links=True)
+    return ow
+
+
+async def close_ticket(channel, t, actor, message=None):
+    update(t["id"], status="closed", closed_at=datetime.now(timezone.utc).isoformat())
+    member = channel.guild.get_member(t["user_id"])
+    if member:
+        try:
+            await channel.set_permissions(member, view_channel=True, send_messages=False, read_message_history=True,
+                                         reason=f"Ticket #{t['id']} closed")
+        except (discord.Forbidden, discord.HTTPException):
+            pass
+    name = channel.name if channel.name.startswith("closed-") else f"closed-{channel.name}"
+    try:
+        await channel.edit(name=name, reason=f"Ticket #{t['id']} closed")
+    except (discord.Forbidden, discord.HTTPException):
+        pass
+    t2 = by_id(t["id"], channel.guild.id)
+    embed = discord.Embed(title=f"🔒 Ticket #{t['id']} Closed", description="This ticket is closed. Staff can reopen or permanently delete it.", color=discord.Color.orange())
+    embed.add_field(name="👤 Owner", value=f"<@{t['user_id']}>")
+    if message:
+        try: await message.edit(embed=embed, view=ClosedTicketView())
+        except discord.HTTPException: pass
+    else:
+        try: await channel.send(embed=embed, view=ClosedTicketView())
+        except discord.HTTPException: pass
+    await log(channel.guild, "🔒 Ticket Closed", f"Ticket `#{t['id']}` was closed by {actor.mention}.\nChannel: {channel.mention}", discord.Color.orange())
+
+
+async def delete_ticket(channel, t, actor):
+    data = await transcript(channel)
+    with db() as c:
+        r = c.execute("SELECT log_channel_id FROM settings WHERE guild_id=?", (channel.guild.id,)).fetchone()
+    log_channel = channel.guild.get_channel(r[0]) if r and r[0] else None
+    if isinstance(log_channel, discord.TextChannel):
+        e = discord.Embed(title="🗑️ Ticket Deleted", description=f"Ticket `#{t['id']}`\nDeleted by: {actor.mention}\nOwner: <@{t['user_id']}>\nDepartment: {DEPARTMENTS.get(t['department'], DEPARTMENTS['general'])[0]}", color=discord.Color.red())
+        try:
+            await log_channel.send(embed=e, file=discord.File(data, filename=f"ticket-{t['id']}-transcript.txt"))
+        except discord.HTTPException:
+            try: await log_channel.send(embed=e)
+            except discord.HTTPException: pass
+    update(t["id"], status="deleted", closed_at=datetime.now(timezone.utc).isoformat())
+    try: await channel.delete(reason=f"Ticket #{t['id']} deleted by {actor}")
+    except (discord.Forbidden, discord.HTTPException): pass
+
 
 class TicketActionView(discord.ui.View):
+    def __init__(self): super().__init__(timeout=None)
+
+    @discord.ui.button(label="Claim", emoji="🙋", style=discord.ButtonStyle.primary, custom_id="gg:ticket:claim")
+    async def claim(self, interaction, button):
+        if not interaction.guild or not isinstance(interaction.user, discord.Member): return
+        if not staff(interaction.user): return await interaction.response.send_message("❌ Only staff can claim tickets.", ephemeral=True)
+        t = ticket_channel(interaction.channel.id)
+        if not t or t["status"] != "open": return await interaction.response.send_message("❌ This is not an open ticket.", ephemeral=True)
+        if t["claimed_by"]: return await interaction.response.send_message(f"❌ Already claimed by <@{t['claimed_by']}>.", ephemeral=True)
+        update(t["id"], claimed_by=interaction.user.id)
+        await interaction.response.send_message(f"🙋 {interaction.user.mention} claimed this ticket.")
+        await log(interaction.guild, "🙋 Ticket Claimed", f"Ticket `#{t['id']}` claimed by {interaction.user.mention}.", discord.Color.green())
+
+    @discord.ui.button(label="Unclaim", emoji="↩️", style=discord.ButtonStyle.secondary, custom_id="gg:ticket:unclaim")
+    async def unclaim(self, interaction, button):
+        if not interaction.guild or not isinstance(interaction.user, discord.Member): return
+        if not staff(interaction.user): return await interaction.response.send_message("❌ Only staff can unclaim tickets.", ephemeral=True)
+        t = ticket_channel(interaction.channel.id)
+        if not t or not t["claimed_by"]: return await interaction.response.send_message("ℹ️ This ticket is not claimed.", ephemeral=True)
+        if t["claimed_by"] != interaction.user.id and not interaction.user.guild_permissions.administrator:
+            return await interaction.response.send_message("❌ Only the claimer or an administrator can unclaim it.", ephemeral=True)
+        update(t["id"], claimed_by=None)
+        await interaction.response.send_message("↩️ Ticket is now unclaimed.")
+
+    @discord.ui.button(label="Close", emoji="🔒", style=discord.ButtonStyle.danger, custom_id="gg:ticket:close")
+    async def close(self, interaction, button):
+        if not interaction.guild or not isinstance(interaction.user, discord.Member): return
+        t = ticket_channel(interaction.channel.id)
+        if not t or t["status"] != "open": return await interaction.response.send_message("❌ This is not an open ticket.", ephemeral=True)
+        if not staff(interaction.user) and interaction.user.id != t["user_id"]:
+            return await interaction.response.send_message("❌ You cannot close this ticket.", ephemeral=True)
+        await interaction.response.defer()
+        await close_ticket(interaction.channel, t, interaction.user, interaction.message)
 
-    def __init__(self):
-        super().__init__(timeout=None)
-
-
-    # =====================================================
-    # CLAIM
-    # =====================================================
-
-    @discord.ui.button(
-        label="Claim",
-        emoji="👤",
-        style=discord.ButtonStyle.primary,
-        custom_id="ticket_claim"
-    )
-    async def claim_ticket(
-        self,
-        interaction: discord.Interaction,
-        button: discord.ui.Button
-    ):
-
-        if not is_staff(interaction.user):
-
-            return await interaction.response.send_message(
-                "❌ Only staff members can claim tickets.",
-                ephemeral=True
-            )
-
-        ticket = get_ticket(
-            interaction.channel.id
-        )
-
-        if ticket is None:
-
-            return await interaction.response.send_message(
-                "❌ This isn't a registered ticket.",
-                ephemeral=True
-            )
-
-        (
-            ticket_id,
-            guild_id,
-            user_id,
-            channel_id,
-            department,
-            status,
-            claimed_by,
-            created_at,
-            closed_at
-        ) = ticket
-
-        if status != "open":
-
-            return await interaction.response.send_message(
-                "❌ This ticket is closed.",
-                ephemeral=True
-            )
-
-        if claimed_by:
-
-            member = interaction.guild.get_member(
-                claimed_by
-            )
-
-            if member:
-
-                return await interaction.response.send_message(
-                    (
-                        "❌ This ticket is already "
-                        f"claimed by {member.mention}."
-                    ),
-                    ephemeral=True
-                )
-
-        cursor.execute("""
-        UPDATE tickets
-        SET claimed_by=?
-        WHERE channel_id=?
-        """, (
-            interaction.user.id,
-            interaction.channel.id
-        ))
-
-        db.commit()
-
-        await interaction.response.send_message(
-            (
-                "👤 Ticket claimed by "
-                f"{interaction.user.mention}."
-            )
-        )
-
-        await send_ticket_log(
-            interaction.guild,
-            "👤 Ticket Claimed",
-            (
-                f"**Ticket:** "
-                f"{interaction.channel.mention}\n"
-                f"**Ticket ID:** #{ticket_id}\n"
-                f"**Claimed By:** "
-                f"{interaction.user.mention}"
-            ),
-            discord.Color.blue()
-        )
-
-
-    # =====================================================
-    # UNCLAIM
-    # =====================================================
-
-    @discord.ui.button(
-        label="Unclaim",
-        emoji="↩️",
-        style=discord.ButtonStyle.secondary,
-        custom_id="ticket_unclaim"
-    )
-    async def unclaim_ticket(
-        self,
-        interaction: discord.Interaction,
-        button: discord.ui.Button
-    ):
-
-        if not is_staff(interaction.user):
-
-            return await interaction.response.send_message(
-                "❌ Only staff members can unclaim tickets.",
-                ephemeral=True
-            )
-
-        ticket = get_ticket(
-            interaction.channel.id
-        )
-
-        if ticket is None:
-
-            return await interaction.response.send_message(
-                "❌ This isn't a registered ticket.",
-                ephemeral=True
-            )
-
-        ticket_id = ticket[0]
-        claimed_by = ticket[6]
-
-        if not claimed_by:
-
-            return await interaction.response.send_message(
-                "❌ This ticket is not currently claimed.",
-                ephemeral=True
-            )
-
-        if (
-            claimed_by != interaction.user.id
-            and not interaction.user.guild_permissions.administrator
-        ):
-
-            return await interaction.response.send_message(
-                (
-                    "❌ Only the staff member who "
-                    "claimed this ticket or an "
-                    "administrator can unclaim it."
-                ),
-                ephemeral=True
-            )
-
-        cursor.execute("""
-        UPDATE tickets
-        SET claimed_by=NULL
-        WHERE channel_id=?
-        """, (
-            interaction.channel.id,
-        ))
-
-        db.commit()
-
-        await interaction.response.send_message(
-            "↩️ Ticket has been unclaimed."
-        )
-
-        await send_ticket_log(
-            interaction.guild,
-            "↩️ Ticket Unclaimed",
-            (
-                f"**Ticket:** "
-                f"{interaction.channel.mention}\n"
-                f"**Ticket ID:** #{ticket_id}\n"
-                f"**Unclaimed By:** "
-                f"{interaction.user.mention}"
-            ),
-            discord.Color.light_grey()
-        )
-
-
-    # =====================================================
-    # CLOSE
-    # =====================================================
-
-    @discord.ui.button(
-        label="Close",
-        emoji="🔒",
-        style=discord.ButtonStyle.danger,
-        custom_id="ticket_close"
-    )
-    async def close_ticket(
-        self,
-        interaction: discord.Interaction,
-        button: discord.ui.Button
-    ):
-
-        ticket = get_ticket(
-            interaction.channel.id
-        )
-
-        if ticket is None:
-
-            return await interaction.response.send_message(
-                "❌ This isn't a registered ticket.",
-                ephemeral=True
-            )
-
-        (
-            ticket_id,
-            guild_id,
-            owner_id,
-            channel_id,
-            department,
-            status,
-            claimed_by,
-            created_at,
-            closed_at
-        ) = ticket
-
-        if status != "open":
-
-            return await interaction.response.send_message(
-                "❌ This ticket is already closed.",
-                ephemeral=True
-            )
-
-        if (
-            interaction.user.id != owner_id
-            and not is_staff(interaction.user)
-        ):
-
-            return await interaction.response.send_message(
-                (
-                    "❌ Only the ticket owner or "
-                    "staff can close this ticket."
-                ),
-                ephemeral=True
-            )
-
-        owner = interaction.guild.get_member(
-            owner_id
-        )
-
-        if owner:
-
-            try:
-
-                await interaction.channel.set_permissions(
-                    owner,
-                    send_messages=False
-                )
-
-            except discord.HTTPException:
-                pass
-
-        cursor.execute("""
-        UPDATE tickets
-        SET status='closed',
-            closed_at=CURRENT_TIMESTAMP
-        WHERE channel_id=?
-        """, (
-            interaction.channel.id,
-        ))
-
-        db.commit()
-
-        try:
-
-            current_name = interaction.channel.name
-
-            if not current_name.startswith(
-                "closed-"
-            ):
-
-                await interaction.channel.edit(
-                    name=(
-                        f"closed-"
-                        f"{current_name}"
-                    )
-                )
-
-        except discord.HTTPException:
-            pass
-
-        closed_embed = discord.Embed(
-            title="🔒 Ticket Closed",
-            description=(
-                "This ticket has been closed.\n\n"
-                "Staff can reopen or delete it "
-                "using the buttons below."
-            ),
-            color=discord.Color.red()
-        )
-
-        closed_embed.add_field(
-            name="🎫 Ticket ID",
-            value=f"#{ticket_id}",
-            inline=True
-        )
-
-        closed_embed.add_field(
-            name="🔒 Closed By",
-            value=interaction.user.mention,
-            inline=True
-        )
-
-        closed_embed.add_field(
-            name="📂 Department",
-            value=department,
-            inline=False
-        )
-
-        await interaction.response.edit_message(
-            embed=closed_embed,
-            view=ClosedTicketView()
-        )
-
-        await send_ticket_log(
-            interaction.guild,
-            "🔒 Ticket Closed",
-            (
-                f"**Ticket:** "
-                f"{interaction.channel.mention}\n"
-                f"**Ticket ID:** #{ticket_id}\n"
-                f"**Department:** "
-                f"{department}\n"
-                f"**Closed By:** "
-                f"{interaction.user.mention}"
-            ),
-            discord.Color.red()
-        )
-
-
-# =========================================================
-# CLOSED TICKET VIEW
-# =========================================================
 
 class ClosedTicketView(discord.ui.View):
+    def __init__(self): super().__init__(timeout=None)
 
-    def __init__(self):
-        super().__init__(timeout=None)
+    @discord.ui.button(label="Reopen", emoji="🔓", style=discord.ButtonStyle.success, custom_id="gg:ticket:reopen")
+    async def reopen(self, interaction, button):
+        if not interaction.guild or not isinstance(interaction.user, discord.Member): return
+        if not staff(interaction.user): return await interaction.response.send_message("❌ Only staff can reopen tickets.", ephemeral=True)
+        t = ticket_channel(interaction.channel.id)
+        if not t or t["status"] != "closed": return await interaction.response.send_message("❌ This ticket is not closed.", ephemeral=True)
+        update(t["id"], status="open", closed_at=None)
+        member = interaction.guild.get_member(t["user_id"])
+        if member:
+            try: await interaction.channel.set_permissions(member, view_channel=True, send_messages=True, read_message_history=True, attach_files=True, embed_links=True)
+            except (discord.Forbidden, discord.HTTPException): pass
+        name = re.sub(r"^closed-", "", interaction.channel.name, flags=re.I)
+        try: await interaction.channel.edit(name=name, reason=f"Ticket #{t['id']} reopened")
+        except (discord.Forbidden, discord.HTTPException): pass
+        await interaction.response.send_message("🔓 Ticket reopened.")
+        await log(interaction.guild, "🔓 Ticket Reopened", f"Ticket `#{t['id']}` reopened by {interaction.user.mention}.", discord.Color.green())
 
-
-    # =====================================================
-    # REOPEN
-    # =====================================================
-
-    @discord.ui.button(
-        label="Reopen",
-        emoji="🔓",
-        style=discord.ButtonStyle.success,
-        custom_id="ticket_reopen"
-    )
-    async def reopen_ticket(
-        self,
-        interaction: discord.Interaction,
-        button: discord.ui.Button
-    ):
-
-        if not is_staff(interaction.user):
-
-            return await interaction.response.send_message(
-                "❌ Only staff members can reopen tickets.",
-                ephemeral=True
-            )
-
-        ticket = get_ticket(
-            interaction.channel.id
-        )
-
-        if ticket is None:
-
-            return await interaction.response.send_message(
-                "❌ This isn't a registered ticket.",
-                ephemeral=True
-            )
-
-        (
-            ticket_id,
-            guild_id,
-            owner_id,
-            channel_id,
-            department,
-            status,
-            claimed_by,
-            created_at,
-            closed_at
-        ) = ticket
-
-        if status != "closed":
-
-            return await interaction.response.send_message(
-                "❌ This ticket isn't closed.",
-                ephemeral=True
-            )
-
-        owner = interaction.guild.get_member(
-            owner_id
-        )
-
-        if owner:
-
-            try:
-
-                await interaction.channel.set_permissions(
-                    owner,
-                    view_channel=True,
-                    send_messages=True,
-                    attach_files=True,
-                    read_message_history=True
-                )
-
-            except discord.HTTPException:
-                pass
-
-        cursor.execute("""
-        UPDATE tickets
-        SET status='open',
-            closed_at=NULL
-        WHERE channel_id=?
-        """, (
-            interaction.channel.id,
-        ))
-
-        db.commit()
-
-        try:
-
-            current_name = interaction.channel.name
-
-            if current_name.startswith(
-                "closed-"
-            ):
-
-                new_name = current_name.replace(
-                    "closed-",
-                    "",
-                    1
-                )
-
-                await interaction.channel.edit(
-                    name=new_name
-                )
-
-        except discord.HTTPException:
-            pass
-
-        embed = discord.Embed(
-            title="🔓 Ticket Reopened",
-            description=(
-                "This ticket has been reopened by "
-                f"{interaction.user.mention}."
-            ),
-            color=discord.Color.green()
-        )
-
-        embed.add_field(
-            name="🎫 Ticket ID",
-            value=f"#{ticket_id}",
-            inline=True
-        )
-
-        embed.add_field(
-            name="📂 Department",
-            value=department,
-            inline=True
-        )
-
-        await interaction.response.edit_message(
-            embed=embed,
-            view=TicketActionView()
-        )
-
-        await send_ticket_log(
-            interaction.guild,
-            "🔓 Ticket Reopened",
-            (
-                f"**Ticket:** "
-                f"{interaction.channel.mention}\n"
-                f"**Ticket ID:** #{ticket_id}\n"
-                f"**Reopened By:** "
-                f"{interaction.user.mention}"
-            ),
-            discord.Color.green()
-        )
-
-
-    # =====================================================
-    # DELETE
-    # =====================================================
-
-    @discord.ui.button(
-        label="Delete",
-        emoji="🗑️",
-        style=discord.ButtonStyle.danger,
-        custom_id="ticket_delete"
-    )
-    async def delete_ticket(
-        self,
-        interaction: discord.Interaction,
-        button: discord.ui.Button
-    ):
-
-        if not is_staff(interaction.user):
-
-            return await interaction.response.send_message(
-                "❌ Only staff members can delete tickets.",
-                ephemeral=True
-            )
-
-        ticket = get_ticket(
-            interaction.channel.id
-        )
-
-        if ticket is None:
-
-            return await interaction.response.send_message(
-                "❌ This isn't a registered ticket.",
-                ephemeral=True
-            )
-
-        # Immediately acknowledge the interaction
-        # so Discord does not time out.
+    @discord.ui.button(label="Delete", emoji="🗑️", style=discord.ButtonStyle.danger, custom_id="gg:ticket:delete")
+    async def delete(self, interaction, button):
+        if not interaction.guild or not isinstance(interaction.user, discord.Member): return
+        if not staff(interaction.user): return await interaction.response.send_message("❌ Only staff can delete tickets.", ephemeral=True)
+        t = ticket_channel(interaction.channel.id)
+        if not t: return await interaction.response.send_message("❌ This is not a ticket.", ephemeral=True)
         await interaction.response.defer()
+        await delete_ticket(interaction.channel, t, interaction.user)
 
-        ticket_id = ticket[0]
-        department = ticket[4]
-        owner_id = ticket[2]
-
-        transcript_file = None
-
-        try:
-
-            transcript = await create_transcript(
-                interaction.channel
-            )
-
-            transcript_file = discord.File(
-                io.BytesIO(
-                    transcript.encode("utf-8")
-                ),
-                filename=(
-                    f"{interaction.channel.name}"
-                    "-transcript.txt"
-                )
-            )
-
-        except Exception as error:
-
-            print(
-                f"⚠️ Transcript error: {error}"
-            )
-
-        cursor.execute("""
-        SELECT log_channel_id
-        FROM settings
-        WHERE guild_id=?
-        """, (
-            interaction.guild.id,
-        ))
-
-        result = cursor.fetchone()
-
-        if result and result[0]:
-
-            log_channel = (
-                interaction.guild.get_channel(
-                    result[0]
-                )
-            )
-
-            if isinstance(
-                log_channel,
-                discord.TextChannel
-            ):
-
-                embed = discord.Embed(
-                    title="🗑️ Ticket Deleted",
-                    description=(
-                        f"**Ticket:** "
-                        f"{interaction.channel.name}\n"
-                        f"**Ticket ID:** "
-                        f"#{ticket_id}\n"
-                        f"**Department:** "
-                        f"{department}\n"
-                        f"**Deleted By:** "
-                        f"{interaction.user.mention}"
-                    ),
-                    color=discord.Color.dark_red(),
-                    timestamp=datetime.now(
-                        timezone.utc
-                    )
-                )
-
-                owner = (
-                    interaction.guild.get_member(
-                        owner_id
-                    )
-                )
-
-                if owner:
-
-                    embed.add_field(
-                        name="👤 Ticket Owner",
-                        value=owner.mention,
-                        inline=False
-                    )
-
-                try:
-
-                    if transcript_file:
-
-                        await log_channel.send(
-                            embed=embed,
-                            file=transcript_file
-                        )
-
-                    else:
-
-                        await log_channel.send(
-                            embed=embed
-                        )
-
-                except discord.HTTPException:
-                    pass
-
-        cursor.execute("""
-        UPDATE tickets
-        SET status='deleted'
-        WHERE channel_id=?
-        """, (
-            interaction.channel.id,
-        ))
-
-        db.commit()
-
-        try:
-
-            await interaction.channel.delete(
-                reason=(
-                    f"Ticket deleted by "
-                    f"{interaction.user}"
-                )
-            )
-
-        except discord.HTTPException:
-            pass
-
-
-# =========================================================
-# TICKET DEPARTMENT SELECT
-# =========================================================
 
 class TicketDepartmentSelect(discord.ui.Select):
-
     def __init__(self):
+        super().__init__(placeholder="Select a ticket department...", min_values=1, max_values=1,
+                         options=[discord.SelectOption(label=v[0], value=k, emoji=v[1], description=v[2]) for k,v in DEPARTMENTS.items()],
+                         custom_id="gg:ticket:department")
 
-        options = [
-
-            discord.SelectOption(
-                label="General Support",
-                description=(
-                    "Get help from the server staff."
-                ),
-                emoji="🛠️",
-                value="general"
-            ),
-
-            discord.SelectOption(
-                label="Report a Bug",
-                description=(
-                    "Report a problem or bug."
-                ),
-                emoji="🐛",
-                value="bug"
-            ),
-
-            discord.SelectOption(
-                label="Partnership",
-                description=(
-                    "Discuss a partnership."
-                ),
-                emoji="🤝",
-                value="partnership"
-            ),
-
-            discord.SelectOption(
-                label="Report a Player/User",
-                description=(
-                    "Report inappropriate behavior."
-                ),
-                emoji="🚨",
-                value="report"
-            )
-        ]
-
-        super().__init__(
-            placeholder=(
-                "Select a ticket department..."
-            ),
-            min_values=1,
-            max_values=1,
-            options=options,
-            custom_id="ticket_department_select"
-        )
-
-
-    async def callback(
-        self,
-        interaction: discord.Interaction
-    ):
-
-        # =================================================
-        # IMPORTANT
-        # Respond immediately so Discord knows the bot is
-        # processing the ticket creation.
-        # =================================================
-
-        await interaction.response.defer(
-            ephemeral=True
-        )
-
-        guild = interaction.guild
-        user = interaction.user
-
-        if guild is None:
-
-            return await interaction.followup.send(
-                (
-                    "❌ Tickets can only be created "
-                    "inside a server."
-                ),
-                ephemeral=True
-            )
-
-        department_data = {
-
-            "general": (
-                "General Support",
-                "general"
-            ),
-
-            "bug": (
-                "Report a Bug",
-                "bug"
-            ),
-
-            "partnership": (
-                "Partnership",
-                "partnership"
-            ),
-
-            "report": (
-                "Report a Player/User",
-                "report"
-            )
-        }
-
-        department, channel_prefix = (
-            department_data[
-                self.values[0]
-            ]
-        )
-
-        # =================================================
-        # CHECK EXISTING OPEN TICKET
-        # =================================================
-
-        existing = get_open_ticket(
-            guild.id,
-            user.id
-        )
-
+    async def callback(self, interaction):
+        if not interaction.guild or not isinstance(interaction.user, discord.Member): return
+        await interaction.response.defer(ephemeral=True)
+        existing = open_ticket(interaction.guild.id, interaction.user.id)
         if existing:
-
-            _, channel_id = existing
-
-            existing_channel = guild.get_channel(
-                channel_id
-            )
-
-            if existing_channel:
-
-                return await interaction.followup.send(
-                    (
-                        "❌ You already have an open "
-                        f"ticket: {existing_channel.mention}"
-                    ),
-                    ephemeral=True
-                )
-
-            cursor.execute("""
-            UPDATE tickets
-            SET status='deleted'
-            WHERE channel_id=?
-            """, (
-                channel_id,
-            ))
-
-            db.commit()
-
-        # =================================================
-        # GET CATEGORY
-        # =================================================
-
-        category = get_ticket_category(
-            guild
-        )
-
-        if category is None:
-
-            try:
-
-                category = (
-                    await guild.create_category(
-                        "Tickets"
-                    )
-                )
-
-            except discord.Forbidden:
-
-                return await interaction.followup.send(
-                    (
-                        "❌ I don't have permission to "
-                        "create the ticket category."
-                    ),
-                    ephemeral=True
-                )
-
-            except discord.HTTPException:
-
-                return await interaction.followup.send(
-                    (
-                        "❌ Discord rejected the ticket "
-                        "category creation."
-                    ),
-                    ephemeral=True
-                )
-
-        # =================================================
-        # TICKET NUMBER
-        # =================================================
-
-        cursor.execute("""
-        SELECT COUNT(*)
-        FROM tickets
-        WHERE guild_id=?
-        """, (
-            guild.id,
-        ))
-
-        ticket_number = (
-            cursor.fetchone()[0] + 1
-        )
-
-        # =================================================
-        # CHANNEL PERMISSIONS
-        # =================================================
-
-        overwrites = {
-
-            guild.default_role:
-                discord.PermissionOverwrite(
-                    view_channel=False
-                ),
-
-            user:
-                discord.PermissionOverwrite(
-                    view_channel=True,
-                    send_messages=True,
-                    attach_files=True,
-                    embed_links=True,
-                    read_message_history=True
-                ),
-
-            guild.me:
-                discord.PermissionOverwrite(
-                    view_channel=True,
-                    send_messages=True,
-                    manage_channels=True,
-                    manage_messages=True,
-                    read_message_history=True
-                )
-        }
-
-        # =================================================
-        # STAFF ACCESS
-        # =================================================
-
-        for role in guild.roles:
-
-            if (
-                role.permissions.manage_guild
-                or role.permissions.administrator
-            ):
-
-                overwrites[role] = (
-                    discord.PermissionOverwrite(
-                        view_channel=True,
-                        send_messages=True,
-                        attach_files=True,
-                        read_message_history=True
-                    )
-                )
-
-        # =================================================
-        # CREATE CHANNEL
-        # =================================================
-
+            ch = interaction.guild.get_channel(existing["channel_id"])
+            if ch: return await interaction.followup.send(f"❌ You already have an open ticket: {ch.mention}", ephemeral=True)
+            update(existing["id"], status="deleted", closed_at=datetime.now(timezone.utc).isoformat())
+        cat = await category(interaction.guild)
+        if not cat: return await interaction.followup.send("❌ I can't access/create the ticket category. Check Manage Channels.", ephemeral=True)
         try:
-
-            channel = (
-                await guild.create_text_channel(
-                    name=(
-                        f"{channel_prefix}-"
-                        f"{ticket_number}"
-                    ),
-                    category=category,
-                    overwrites=overwrites,
-                    reason=(
-                        f"{department} ticket "
-                        f"created by {user}"
-                    )
-                )
-            )
-
-        except discord.Forbidden:
-
-            return await interaction.followup.send(
-                (
-                    "❌ I don't have permission to "
-                    "create ticket channels."
-                ),
-                ephemeral=True
-            )
-
+            ch = await interaction.guild.create_text_channel("ticket-pending", category=cat, overwrites=overwrites(interaction.guild, interaction.user), reason="Grid Guardian ticket")
+        except discord.Forbidden: return await interaction.followup.send("❌ I don't have permission to create ticket channels.", ephemeral=True)
+        except discord.HTTPException as e: return await interaction.followup.send(f"❌ Discord rejected ticket creation: `{e}`", ephemeral=True)
+        try:
+            with db() as c:
+                cur = c.execute("INSERT INTO tickets(guild_id,user_id,channel_id,department,status,created_at) VALUES(?,?,?,?,'open',?)",
+                                (interaction.guild.id, interaction.user.id, ch.id, self.values[0], datetime.now(timezone.utc).isoformat()))
+                tid = cur.lastrowid
+        except sqlite3.Error:
+            try: await ch.delete(reason="Ticket database error")
+            except discord.HTTPException: pass
+            return await interaction.followup.send("❌ The ticket could not be saved.", ephemeral=True)
+        try: await ch.edit(name=f"ticket-{tid}", reason="Ticket naming")
+        except (discord.Forbidden, discord.HTTPException): pass
+        t = by_id(tid, interaction.guild.id)
+        try: await ch.send(content=interaction.user.mention, embed=ticket_embed(t, interaction.user), view=TicketActionView())
         except discord.HTTPException:
+            update(tid, status="deleted")
+            try: await ch.delete(reason="Ticket setup message failed")
+            except discord.HTTPException: pass
+            return await interaction.followup.send("❌ I couldn't finish setting up the ticket.", ephemeral=True)
+        await interaction.followup.send(f"✅ Your ticket has been created: {ch.mention}", ephemeral=True)
+        await log(interaction.guild, "🎫 Ticket Created", f"Ticket `#{tid}` created by {interaction.user.mention}.\nDepartment: {DEPARTMENTS[self.values[0]][0]}\nChannel: {ch.mention}")
 
-            return await interaction.followup.send(
-                (
-                    "❌ Discord rejected the ticket "
-                    "creation."
-                ),
-                ephemeral=True
-            )
-
-        # =================================================
-        # DATABASE
-        # =================================================
-
-        cursor.execute("""
-        INSERT INTO tickets(
-            guild_id,
-            user_id,
-            channel_id,
-            department,
-            status
-        )
-        VALUES (?, ?, ?, ?, 'open')
-        """, (
-            guild.id,
-            user.id,
-            channel.id,
-            department
-        ))
-
-        db.commit()
-
-        ticket_id = cursor.lastrowid
-
-        # =================================================
-        # TICKET EMBED
-        # =================================================
-
-        embed = discord.Embed(
-            title=f"🎟️ {department}",
-            description=(
-                f"Welcome {user.mention}!\n\n"
-                "Please describe your issue in as "
-                "much detail as possible.\n\n"
-                "A staff member will assist you "
-                "shortly."
-            ),
-            color=EMBED_COLOR
-        )
-
-        embed.add_field(
-            name="🎫 Ticket ID",
-            value=f"#{ticket_id}",
-            inline=True
-        )
-
-        embed.add_field(
-            name="📂 Department",
-            value=department,
-            inline=True
-        )
-
-        embed.add_field(
-            name="👤 Created By",
-            value=user.mention,
-            inline=False
-        )
-
-        embed.add_field(
-            name="📌 Staff",
-            value=(
-                "A staff member can claim this "
-                "ticket using the button below."
-            ),
-            inline=False
-        )
-
-        embed.set_footer(
-            text=(
-                "Grid Guardian Support System"
-            )
-        )
-
-        await channel.send(
-            content=user.mention,
-            embed=embed,
-            view=TicketActionView()
-        )
-
-        # =================================================
-        # CONFIRM USER
-        # =================================================
-
-        await interaction.followup.send(
-            (
-                "✅ Your ticket has been created: "
-                f"{channel.mention}"
-            ),
-            ephemeral=True
-        )
-
-        # =================================================
-        # LOG CREATION
-        # =================================================
-
-        await send_ticket_log(
-            guild,
-            "🎟️ Ticket Created",
-            (
-                f"**Ticket:** {channel.mention}\n"
-                f"**Ticket ID:** #{ticket_id}\n"
-                f"**Department:** {department}\n"
-                f"**Created By:** {user.mention}"
-            ),
-            discord.Color.green()
-        )
-
-
-# =========================================================
-# TICKET PANEL VIEW
-# =========================================================
 
 class TicketPanelView(discord.ui.View):
-
     def __init__(self):
+        super().__init__(timeout=None)
+        self.add_item(TicketDepartmentSelect())
 
-        super().__init__(
-            timeout=None
-        )
-
-        self.add_item(
-            TicketDepartmentSelect()
-        )
-
-
-# =========================================================
-# TICKETS COG
-# =========================================================
 
 class Tickets(commands.Cog):
-
     def __init__(self, bot):
-
         self.bot = bot
-
-
-    # =====================================================
-    # PERSISTENT VIEWS
-    # =====================================================
+        init_db()
 
     async def cog_load(self):
+        self.bot.add_view(TicketPanelView())
+        self.bot.add_view(TicketActionView())
+        self.bot.add_view(ClosedTicketView())
 
-        self.bot.add_view(
-            TicketPanelView()
-        )
+    @commands.command(name="ticketpanel")
+    @commands.guild_only()
+    @commands.has_guild_permissions(manage_guild=True)
+    async def ticketpanel(self, ctx):
+        await ctx.send(embed=panel_embed(), view=TicketPanelView())
 
-        self.bot.add_view(
-            TicketActionView()
-        )
+    @commands.command(name="setticketcategory")
+    @commands.guild_only()
+    @commands.has_guild_permissions(manage_guild=True)
+    async def setticketcategory(self, ctx, category: discord.CategoryChannel):
+        set_setting(ctx.guild.id, category.id)
+        await ctx.send(f"✅ Ticket category set to {category.mention}.")
 
-        self.bot.add_view(
-            ClosedTicketView()
-        )
+    @commands.command(name="closeticket")
+    @commands.guild_only()
+    async def closeticket(self, ctx):
+        t = ticket_channel(ctx.channel.id)
+        if not t: return await ctx.send("❌ This isn't a Grid Guardian ticket.", delete_after=5)
+        if not staff(ctx.author) and ctx.author.id != t["user_id"]: return await ctx.send("❌ You cannot close this ticket.", delete_after=5)
+        await close_ticket(ctx.channel, t, ctx.author)
 
+    @commands.command(name="reopenticket")
+    @commands.guild_only()
+    @commands.has_guild_permissions(manage_guild=True)
+    async def reopenticket(self, ctx):
+        t = ticket_channel(ctx.channel.id)
+        if not t or t["status"] != "closed": return await ctx.send("❌ This is not a closed ticket.", delete_after=5)
+        update(t["id"], status="open", closed_at=None)
+        member = ctx.guild.get_member(t["user_id"])
+        if member:
+            try: await ctx.channel.set_permissions(member, view_channel=True, send_messages=True, read_message_history=True, attach_files=True, embed_links=True)
+            except (discord.Forbidden, discord.HTTPException): pass
+        try: await ctx.channel.edit(name=re.sub(r"^closed-", "", ctx.channel.name, flags=re.I))
+        except (discord.Forbidden, discord.HTTPException): pass
+        await ctx.send("🔓 Ticket reopened.")
 
-    # =====================================================
-    # TICKET PANEL
-    # =====================================================
+    @commands.command(name="ticketclaim")
+    @commands.guild_only()
+    @commands.has_guild_permissions(manage_guild=True)
+    async def ticketclaim(self, ctx):
+        t = ticket_channel(ctx.channel.id)
+        if not t or t["status"] != "open": return await ctx.send("❌ This isn't an open ticket.", delete_after=5)
+        if t["claimed_by"]: return await ctx.send(f"❌ Already claimed by <@{t['claimed_by']}>.", delete_after=5)
+        update(t["id"], claimed_by=ctx.author.id)
+        await ctx.send(f"🙋 {ctx.author.mention} claimed ticket `#{t['id']}`.")
 
-    @commands.command()
-    @commands.has_permissions(
-        manage_guild=True
-    )
-    async def ticketpanel(
-        self,
-        ctx
-    ):
+    @commands.command(name="ticketunclaim")
+    @commands.guild_only()
+    @commands.has_guild_permissions(manage_guild=True)
+    async def ticketunclaim(self, ctx):
+        t = ticket_channel(ctx.channel.id)
+        if not t or not t["claimed_by"]: return await ctx.send("ℹ️ This ticket is unclaimed.", delete_after=5)
+        if t["claimed_by"] != ctx.author.id and not ctx.author.guild_permissions.administrator: return await ctx.send("❌ Only the claimer or an administrator can unclaim it.", delete_after=5)
+        update(t["id"], claimed_by=None)
+        await ctx.send("↩️ Ticket is now unclaimed.")
 
-        embed = discord.Embed(
-            title="🎟️ Grid Guardian Support",
-            description=(
-                "Need help? Select the type of "
-                "ticket you would like to create "
-                "below.\n\n"
-                "🔒 Your ticket will be private and "
-                "only visible to you and server staff."
-            ),
-            color=EMBED_COLOR
-        )
-
-        embed.add_field(
-            name="🛠️ General Support",
-            value=(
-                "Questions, account help, or "
-                "general server support."
-            ),
-            inline=False
-        )
-
-        embed.add_field(
-            name="🐛 Report a Bug",
-            value=(
-                "Report a problem, glitch, or bug."
-            ),
-            inline=False
-        )
-
-        embed.add_field(
-            name="🤝 Partnership",
-            value=(
-                "Discuss partnerships or "
-                "collaborations."
-            ),
-            inline=False
-        )
-
-        embed.add_field(
-            name="🚨 Report a Player/User",
-            value=(
-                "Report inappropriate behavior or "
-                "rule violations."
-            ),
-            inline=False
-        )
-
-        embed.set_footer(
-            text=(
-                "Grid Guardian • Support System"
-            )
-        )
-
-        await ctx.send(
-            embed=embed,
-            view=TicketPanelView()
-        )
-
-
-    # =====================================================
-    # SET TICKET CATEGORY
-    # =====================================================
-
-    @commands.command()
-    @commands.has_permissions(
-        manage_guild=True
-    )
-    async def setticketcategory(
-        self,
-        ctx,
-        category: discord.CategoryChannel
-    ):
-
-        cursor.execute("""
-        INSERT OR IGNORE INTO settings(guild_id)
-        VALUES(?)
-        """, (
-            ctx.guild.id,
-        ))
-
-        cursor.execute("""
-        UPDATE settings
-        SET ticket_category_id=?
-        WHERE guild_id=?
-        """, (
-            category.id,
-            ctx.guild.id
-        ))
-
-        db.commit()
-
-        embed = discord.Embed(
-            title="✅ Ticket Category Updated",
-            description=(
-                "New tickets will be created in "
-                f"**{category.name}**."
-            ),
-            color=discord.Color.green()
-        )
-
-        await ctx.send(
-            embed=embed
-        )
-
-
-    # =====================================================
-    # CLOSE TICKET COMMAND
-    # =====================================================
-
-    @commands.command()
-    async def closeticket(
-        self,
-        ctx
-    ):
-
-        ticket = get_ticket(
-            ctx.channel.id
-        )
-
-        if ticket is None:
-
-            return await ctx.send(
-                (
-                    "❌ This command can only be used "
-                    "inside a ticket."
-                )
-            )
-
-        (
-            ticket_id,
-            guild_id,
-            owner_id,
-            channel_id,
-            department,
-            status,
-            claimed_by,
-            created_at,
-            closed_at
-        ) = ticket
-
-        if status != "open":
-
-            return await ctx.send(
-                "❌ This ticket is already closed."
-            )
-
-        if (
-            ctx.author.id != owner_id
-            and not is_staff(ctx.author)
-        ):
-
-            return await ctx.send(
-                (
-                    "❌ Only the ticket owner or "
-                    "staff can close this ticket."
-                )
-            )
-
-        owner = ctx.guild.get_member(
-            owner_id
-        )
-
-        if owner:
-
-            try:
-
-                await ctx.channel.set_permissions(
-                    owner,
-                    send_messages=False
-                )
-
-            except discord.HTTPException:
-                pass
-
-        cursor.execute("""
-        UPDATE tickets
-        SET status='closed',
-            closed_at=CURRENT_TIMESTAMP
-        WHERE channel_id=?
-        """, (
-            ctx.channel.id,
-        ))
-
-        db.commit()
-
+    @commands.command(name="ticketadd")
+    @commands.guild_only()
+    @commands.has_guild_permissions(manage_guild=True)
+    async def ticketadd(self, ctx, member: discord.Member):
+        t = ticket_channel(ctx.channel.id)
+        if not t: return await ctx.send("❌ This isn't a ticket.", delete_after=5)
         try:
+            await ctx.channel.set_permissions(member, view_channel=True, send_messages=True, read_message_history=True, attach_files=True, embed_links=True, reason=f"Added to ticket #{t['id']}")
+            await ctx.send(f"✅ Added {member.mention} to the ticket.")
+        except discord.Forbidden: await ctx.send("❌ I can't change channel permissions.", delete_after=5)
 
-            if not ctx.channel.name.startswith(
-                "closed-"
-            ):
+    @commands.command(name="ticketremove")
+    @commands.guild_only()
+    @commands.has_guild_permissions(manage_guild=True)
+    async def ticketremove(self, ctx, member: discord.Member):
+        t = ticket_channel(ctx.channel.id)
+        if not t: return await ctx.send("❌ This isn't a ticket.", delete_after=5)
+        if member.id == t["user_id"]: return await ctx.send("❌ You cannot remove the ticket owner.", delete_after=5)
+        try:
+            await ctx.channel.set_permissions(member, overwrite=None, reason=f"Removed from ticket #{t['id']}")
+            await ctx.send(f"✅ Removed {member.mention} from the ticket.")
+        except discord.Forbidden: await ctx.send("❌ I can't change channel permissions.", delete_after=5)
 
-                await ctx.channel.edit(
-                    name=(
-                        f"closed-"
-                        f"{ctx.channel.name}"
-                    )
-                )
+    @commands.command(name="ticketrename")
+    @commands.guild_only()
+    @commands.has_guild_permissions(manage_guild=True)
+    async def ticketrename(self, ctx, *, new_name: str):
+        t = ticket_channel(ctx.channel.id)
+        if not t: return await ctx.send("❌ This isn't a ticket.", delete_after=5)
+        name = re.sub(r"[^a-zA-Z0-9-_]", "-", new_name).strip("-").lower()[:80]
+        if not name: return await ctx.send("❌ Invalid channel name.", delete_after=5)
+        if not name.startswith(("ticket-", "closed-")): name = "ticket-" + name
+        try: await ctx.channel.edit(name=name, reason=f"Ticket #{t['id']} renamed")
+        except discord.Forbidden: return await ctx.send("❌ I can't rename this channel.", delete_after=5)
+        await ctx.send(f"✏️ Ticket renamed to `{name}`.")
 
-        except discord.HTTPException:
-            pass
+    @commands.command(name="ticketinfo")
+    @commands.guild_only()
+    async def ticketinfo(self, ctx):
+        t = ticket_channel(ctx.channel.id)
+        if not t: return await ctx.send("❌ This isn't a ticket.", delete_after=5)
+        label = DEPARTMENTS.get(t["department"], DEPARTMENTS["general"])[0]
+        e = discord.Embed(title=f"🎫 Ticket #{t['id']} Information", color=EMBED_COLOR)
+        e.add_field(name="👤 Owner", value=f"<@{t['user_id']}>", inline=True)
+        e.add_field(name="📂 Department", value=label, inline=True)
+        e.add_field(name="📌 Status", value=t["status"].title(), inline=True)
+        e.add_field(name="🙋 Claimed By", value=f"<@{t['claimed_by']}>" if t["claimed_by"] else "Unclaimed", inline=True)
+        e.add_field(name="🕐 Created", value=t["created_at"], inline=False)
+        e.add_field(name="🔒 Closed", value=t["closed_at"] or "Not closed", inline=False)
+        await ctx.send(embed=e)
 
-        embed = discord.Embed(
-            title="🔒 Ticket Closed",
-            description=(
-                "This ticket has been closed.\n\n"
-                "Staff can reopen or delete it using "
-                "the buttons below."
-            ),
-            color=discord.Color.red()
-        )
+    @commands.command(name="tickettranscript")
+    @commands.guild_only()
+    @commands.has_guild_permissions(manage_guild=True)
+    async def tickettranscript(self, ctx):
+        t = ticket_channel(ctx.channel.id)
+        if not t: return await ctx.send("❌ This isn't a ticket.", delete_after=5)
+        await ctx.send(file=discord.File(await transcript(ctx.channel), filename=f"ticket-{t['id']}-transcript.txt"))
 
-        embed.add_field(
-            name="🎫 Ticket ID",
-            value=f"#{ticket_id}",
-            inline=True
-        )
+    @commands.command(name="deleteticket")
+    @commands.guild_only()
+    @commands.has_guild_permissions(manage_guild=True)
+    async def deleteticket(self, ctx):
+        t = ticket_channel(ctx.channel.id)
+        if not t: return await ctx.send("❌ This isn't a ticket.", delete_after=5)
+        await ctx.send("🗑️ Creating transcript and deleting ticket...")
+        await delete_ticket(ctx.channel, t, ctx.author)
 
-        embed.add_field(
-            name="📂 Department",
-            value=department,
-            inline=True
-        )
+    @commands.Cog.listener()
+    async def on_command_error(self, ctx, error):
+        if isinstance(error, commands.CommandNotFound): return
+        if isinstance(error, commands.MissingPermissions): return await ctx.send("❌ You don't have permission to use that command.", delete_after=5)
+        if isinstance(error, commands.MissingRequiredArgument): return await ctx.send("❌ You're missing a required argument.", delete_after=5)
+        if isinstance(error, commands.BadArgument): return await ctx.send("❌ I couldn't find that member/category. Check your argument.", delete_after=5)
+        raise error
 
-        await ctx.send(
-            embed=embed,
-            view=ClosedTicketView()
-        )
-
-        await send_ticket_log(
-            ctx.guild,
-            "🔒 Ticket Closed",
-            (
-                f"**Ticket:** "
-                f"{ctx.channel.mention}\n"
-                f"**Ticket ID:** #{ticket_id}\n"
-                f"**Department:** "
-                f"{department}\n"
-                f"**Closed By:** "
-                f"{ctx.author.mention}"
-            ),
-            discord.Color.red()
-        )
-
-
-# =========================================================
-# SETUP
-# =========================================================
 
 async def setup(bot):
-
-    await bot.add_cog(
-        Tickets(bot)
-    )
+    await bot.add_cog(Tickets(bot))
