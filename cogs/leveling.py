@@ -1,1195 +1,393 @@
-import random
 import sqlite3
 import time
+import random
 
 import discord
 from discord.ext import commands
 
-from cogs.utils.achievement_manager import unlock
-
-
-# ==========================================================
-# CONFIGURATION
-# ==========================================================
-
-EMBED_COLOR = discord.Color.from_rgb(
-    80,
-    220,
-    255
-)
-
-XP_COOLDOWN = 60
-
-MIN_XP_GAIN = 5
-MAX_XP_GAIN = 15
-
-# Every level requires the same amount of XP.
-#
-# Level 1 -> Level 2 = 100 XP
-# Level 2 -> Level 3 = 100 XP
-# Level 3 -> Level 4 = 100 XP
-#
-# Total XP is stored permanently.
-XP_PER_LEVEL = 100
-
-
-# ==========================================================
-# DATABASE
-# ==========================================================
-
 DB_PATH = "gridguardian.db"
 
+XP_COOLDOWN = 60
+XP_MIN = 5
+XP_MAX = 15
 
-def get_db():
-    """
-    Create a fresh SQLite connection.
-    """
+BASE_XP_REQUIRED = 100
+XP_INCREASE_PER_LEVEL = 25
 
-    connection = sqlite3.connect(
-        DB_PATH,
-        timeout=30,
-        check_same_thread=False
-    )
-
-    connection.row_factory = sqlite3.Row
-
-    connection.execute(
-        "PRAGMA busy_timeout = 30000"
-    )
-
-    connection.execute(
-        "PRAGMA journal_mode = WAL"
-    )
-
-    connection.execute(
-        "PRAGMA synchronous = NORMAL"
-    )
-
-    return connection
+LEVEL_ACHIEVEMENTS = {
+    5: "Level 5",
+    10: "Level 10",
+    25: "Level 25",
+    50: "Level 50",
+    100: "Level 100",
+}
 
 
-# ==========================================================
-# INITIALIZE DATABASE
-# ==========================================================
-
-def initialize_database():
-
-    db = get_db()
-
-    try:
-
-        cursor = db.cursor()
-
-        # --------------------------------------------------
-        # Levels
-        # --------------------------------------------------
-
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS levels (
-                user_id INTEGER PRIMARY KEY,
-                xp INTEGER DEFAULT 0,
-                level INTEGER DEFAULT 1
-            )
-        """)
-
-        # --------------------------------------------------
-        # Add total_xp if this is an existing database.
-        # --------------------------------------------------
-
-        cursor.execute(
-            "PRAGMA table_info(levels)"
-        )
-
-        columns = {
-            row["name"]
-            for row in cursor.fetchall()
-        }
-
-        if "total_xp" not in columns:
-
-            cursor.execute(
-                """
-                ALTER TABLE levels
-                ADD COLUMN total_xp INTEGER DEFAULT 0
-                """
-            )
-
-        # --------------------------------------------------
-        # Migrate existing users.
-        #
-        # The old system stored:
-        #
-        #     level
-        #     xp inside that level
-        #
-        # Example:
-        #
-        # Level 6 + 37 XP
-        #
-        # becomes:
-        #
-        # Total XP = 537
-        #
-        # This preserves their progress.
-        # --------------------------------------------------
-
-        cursor.execute(
-            """
-            SELECT
-                user_id,
-                xp,
-                level,
-                total_xp
-            FROM levels
-            """
-        )
-
-        existing_users = cursor.fetchall()
-
-        for user in existing_users:
-
-            user_id = int(user["user_id"])
-
-            old_xp = max(
-                0,
-                int(user["xp"] or 0)
-            )
-
-            old_level = max(
-                1,
-                int(user["level"] or 1)
-            )
-
-            current_total = user["total_xp"]
-
-            # ----------------------------------------------
-            # Only migrate rows that don't already have a
-            # meaningful total XP value.
-            # ----------------------------------------------
-
-            if current_total is None or int(current_total) <= 0:
-
-                total_xp = (
-                    (old_level - 1) * XP_PER_LEVEL
-                    + old_xp
-                )
-
-                cursor.execute(
-                    """
-                    UPDATE levels
-                    SET total_xp = ?
-                    WHERE user_id = ?
-                    """,
-                    (
-                        total_xp,
-                        user_id
-                    )
-                )
-
-        db.commit()
-
-    finally:
-
-        db.close()
+def xp_required_for_level(level: int) -> int:
+    level = max(1, int(level))
+    return BASE_XP_REQUIRED + ((level - 1) * XP_INCREASE_PER_LEVEL)
 
 
-initialize_database()
+def level_from_total_xp(total_xp: int) -> int:
+    total_xp = max(0, int(total_xp))
+    level = 1
+    remaining = total_xp
+
+    while remaining >= xp_required_for_level(level):
+        remaining -= xp_required_for_level(level)
+        level += 1
+
+    return level
 
 
-# ==========================================================
-# LEVELING COG
-# ==========================================================
+def progress_from_total_xp(total_xp: int) -> tuple[int, int]:
+    total_xp = max(0, int(total_xp))
+    level = 1
+    remaining = total_xp
+
+    while remaining >= xp_required_for_level(level):
+        remaining -= xp_required_for_level(level)
+        level += 1
+
+    return remaining, xp_required_for_level(level)
+
 
 class Leveling(commands.Cog):
+    """XP, levels, ranks, achievements, and level roles."""
 
-    def __init__(self, bot):
-
+    def __init__(self, bot: commands.Bot):
         self.bot = bot
+        self.xp_cooldowns: dict[int, float] = {}
+        self.init_database()
 
-        # --------------------------------------------------
-        # User ID -> timestamp
-        #
-        # This is only a message XP cooldown.
-        # It does NOT control level progression.
-        # --------------------------------------------------
-
-        self.cooldowns = {}
-
-
-    # ======================================================
-    # LEVEL FROM TOTAL XP
-    # ======================================================
-
-    @staticmethod
-    def level_from_total_xp(total_xp: int) -> int:
-        """
-        Calculate a user's level from their permanent
-        total XP value.
-
-        Examples:
-
-        0 XP   -> Level 1
-        99 XP  -> Level 1
-        100 XP -> Level 2
-        199 XP -> Level 2
-        200 XP -> Level 3
-        500 XP -> Level 6
-        600 XP -> Level 7
-
-        The level can never go backward unless total XP
-        itself is deliberately reduced.
-        """
-
-        total_xp = max(
-            0,
-            int(total_xp)
-        )
-
-        return (
-            total_xp // XP_PER_LEVEL
-        ) + 1
-
-
-    # ======================================================
-    # XP REQUIRED FOR NEXT LEVEL
-    # ======================================================
-
-    @staticmethod
-    def xp_required(level: int) -> int:
-        """
-        XP required for the next level.
-
-        Every level requires the same amount.
-        """
-
-        return XP_PER_LEVEL
-
-
-    # ======================================================
-    # XP INSIDE CURRENT LEVEL
-    # ======================================================
-
-    @staticmethod
-    def current_level_xp(total_xp: int) -> int:
-        """
-        Return the XP progress inside the user's
-        current level.
-        """
-
-        total_xp = max(
-            0,
-            int(total_xp)
-        )
-
-        return total_xp % XP_PER_LEVEL
-
-
-    # ======================================================
-    # GET USER DATA
-    # ======================================================
-
-    @staticmethod
-    def get_user_data(user_id: int):
-
-        db = get_db()
-
-        try:
-
-            cursor = db.cursor()
+    def init_database(self):
+        with sqlite3.connect(DB_PATH) as conn:
+            cursor = conn.cursor()
 
             cursor.execute(
                 """
-                SELECT
-                    user_id,
-                    xp,
-                    level,
-                    total_xp
-                FROM levels
-                WHERE user_id = ?
-                """,
-                (
-                    user_id,
+                CREATE TABLE IF NOT EXISTS levels (
+                    user_id INTEGER PRIMARY KEY,
+                    xp INTEGER DEFAULT 0,
+                    level INTEGER DEFAULT 1,
+                    total_xp INTEGER DEFAULT 0
                 )
+                """
             )
 
-            data = cursor.fetchone()
+            cursor.execute("PRAGMA table_info(levels)")
+            columns = {row[1] for row in cursor.fetchall()}
 
-            if data is None:
+            if "total_xp" not in columns:
+                cursor.execute(
+                    "ALTER TABLE levels ADD COLUMN total_xp INTEGER DEFAULT 0"
+                )
+
+            # Migrate users from the old fixed-100 XP system.
+            cursor.execute(
+                "SELECT user_id, xp, level, total_xp FROM levels"
+            )
+
+            for user_id, old_xp, old_level, stored_total_xp in cursor.fetchall():
+                old_xp = max(0, int(old_xp or 0))
+                old_level = max(1, int(old_level or 1))
+                stored_total_xp = int(stored_total_xp or 0)
+
+                if stored_total_xp == 0 and (old_level > 1 or old_xp > 0):
+                    migrated_total_xp = ((old_level - 1) * 100) + old_xp
+                    cursor.execute(
+                        "UPDATE levels SET total_xp = ? WHERE user_id = ?",
+                        (migrated_total_xp, user_id),
+                    )
+
+            conn.commit()
+
+    def get_user_data(self, user_id: int):
+        with sqlite3.connect(DB_PATH) as conn:
+            cursor = conn.cursor()
+            cursor.execute(
+                "SELECT xp, level, total_xp FROM levels WHERE user_id = ?",
+                (user_id,),
+            )
+            row = cursor.fetchone()
+
+            if row is None:
                 return None
 
-            # ------------------------------------------------
-            # Always derive the level from total XP.
-            #
-            # This protects against an old/inconsistent
-            # level value sitting in the database.
-            # ------------------------------------------------
-
-            total_xp = max(
-                0,
-                int(data["total_xp"] or 0)
-            )
-
-            calculated_level = (
-                Leveling.level_from_total_xp(
-                    total_xp
-                )
-            )
-
-            current_xp = (
-                Leveling.current_level_xp(
-                    total_xp
-                )
-            )
-
-            # ------------------------------------------------
-            # If the legacy columns are incorrect, repair
-            # them while we're here.
-            # ------------------------------------------------
+            old_xp, stored_level, total_xp = row
+            total_xp = max(0, int(total_xp or 0))
+            level = level_from_total_xp(total_xp)
+            current_xp, required_xp = progress_from_total_xp(total_xp)
 
             if (
-                int(data["level"] or 1)
-                != calculated_level
-                or
-                int(data["xp"] or 0)
-                != current_xp
+                int(old_xp or 0) != current_xp
+                or int(stored_level or 1) != level
             ):
-
                 cursor.execute(
                     """
                     UPDATE levels
-                    SET
-                        xp = ?,
-                        level = ?,
-                        total_xp = ?
+                    SET xp = ?, level = ?, total_xp = ?
                     WHERE user_id = ?
                     """,
-                    (
-                        current_xp,
-                        calculated_level,
-                        total_xp,
-                        user_id
-                    )
+                    (current_xp, level, total_xp, user_id),
                 )
-
-                db.commit()
+                conn.commit()
 
             return {
-                "user_id": user_id,
                 "xp": current_xp,
-                "level": calculated_level,
-                "total_xp": total_xp
+                "level": level,
+                "total_xp": total_xp,
+                "required": required_xp,
             }
 
-        finally:
-
-            db.close()
-
-
-    # ======================================================
-    # MESSAGE LISTENER
-    # ======================================================
-
     @commands.Cog.listener()
-    async def on_message(
-        self,
-        message: discord.Message
-    ):
-
-        # --------------------------------------------------
-        # Ignore bots
-        # --------------------------------------------------
-
-        if message.author.bot:
+    async def on_message(self, message: discord.Message):
+        if message.author.bot or message.guild is None:
             return
 
-
-        # --------------------------------------------------
-        # Ignore DMs
-        # --------------------------------------------------
-
-        if message.guild is None:
-            return
-
-
-        # --------------------------------------------------
-        # XP cooldown
-        # --------------------------------------------------
-
+        user_id = message.author.id
         now = time.time()
 
-        last = self.cooldowns.get(
-            message.author.id,
-            0
-        )
-
-        if now - last < XP_COOLDOWN:
+        if now - self.xp_cooldowns.get(user_id, 0) < XP_COOLDOWN:
             return
 
-        self.cooldowns[
-            message.author.id
-        ] = now
+        self.xp_cooldowns[user_id] = now
+        xp_gain = random.randint(XP_MIN, XP_MAX)
 
-
-        # --------------------------------------------------
-        # Random XP
-        # --------------------------------------------------
-
-        xp_gain = random.randint(
-            MIN_XP_GAIN,
-            MAX_XP_GAIN
-        )
-
-
-        # ==================================================
-        # DATABASE
-        # ==================================================
-
-        db = get_db()
-
-        try:
-
-            cursor = db.cursor()
-
-            # ------------------------------------------------
-            # BEGIN IMMEDIATE
-            #
-            # This prevents two simultaneous XP updates from
-            # reading the same old value and overwriting each
-            # other.
-            # ------------------------------------------------
+        with sqlite3.connect(DB_PATH, timeout=10) as conn:
+            cursor = conn.cursor()
+            cursor.execute("BEGIN IMMEDIATE")
 
             cursor.execute(
-                "BEGIN IMMEDIATE"
+                "SELECT xp, level, total_xp FROM levels WHERE user_id = ?",
+                (user_id,),
             )
+            row = cursor.fetchone()
 
-
-            # ==================================================
-            # GET CURRENT DATA
-            # ==================================================
-
-            cursor.execute(
-                """
-                SELECT
-                    user_id,
-                    xp,
-                    level,
-                    total_xp
-                FROM levels
-                WHERE user_id = ?
-                """,
-                (
-                    message.author.id,
-                )
-            )
-
-            data = cursor.fetchone()
-
-
-            # ==================================================
-            # NEW USER
-            # ==================================================
-
-            if data is None:
-
+            if row is None:
+                old_level = 1
                 total_xp = xp_gain
+            else:
+                old_xp, stored_level, stored_total_xp = row
+                old_xp = max(0, int(old_xp or 0))
+                stored_level = max(1, int(stored_level or 1))
+                stored_total_xp = int(stored_total_xp or 0)
 
-                level = (
-                    self.level_from_total_xp(
-                        total_xp
-                    )
-                )
+                if stored_total_xp == 0 and (stored_level > 1 or old_xp > 0):
+                    stored_total_xp = ((stored_level - 1) * 100) + old_xp
 
-                current_xp = (
-                    self.current_level_xp(
-                        total_xp
-                    )
-                )
+                total_xp = max(0, stored_total_xp)
+                old_level = level_from_total_xp(total_xp)
+                total_xp += xp_gain
 
+            new_level = level_from_total_xp(total_xp)
+            new_level = max(old_level, new_level)
+            current_xp, _ = progress_from_total_xp(total_xp)
+
+            if row is None:
                 cursor.execute(
                     """
-                    INSERT INTO levels (
-                        user_id,
-                        xp,
-                        level,
-                        total_xp
-                    )
+                    INSERT INTO levels (user_id, xp, level, total_xp)
                     VALUES (?, ?, ?, ?)
                     """,
-                    (
-                        message.author.id,
-                        current_xp,
-                        level,
-                        total_xp
-                    )
+                    (user_id, current_xp, new_level, total_xp),
                 )
-
-                db.commit()
-
-                return
-
-
-            # ==================================================
-            # EXISTING USER
-            # ==================================================
-
-            stored_total_xp = data["total_xp"]
-
-            # ------------------------------------------------
-            # Safety fallback for an old row.
-            # ------------------------------------------------
-
-            if stored_total_xp is None:
-
-                old_xp = max(
-                    0,
-                    int(data["xp"] or 0)
-                )
-
-                old_level = max(
-                    1,
-                    int(data["level"] or 1)
-                )
-
-                stored_total_xp = (
-                    (old_level - 1) * XP_PER_LEVEL
-                    + old_xp
-                )
-
             else:
-
-                stored_total_xp = max(
-                    0,
-                    int(stored_total_xp)
+                cursor.execute(
+                    """
+                    UPDATE levels
+                    SET xp = ?, level = ?, total_xp = ?
+                    WHERE user_id = ?
+                    """,
+                    (current_xp, new_level, total_xp, user_id),
                 )
 
+            conn.commit()
 
-            # ------------------------------------------------
-            # Save the level BEFORE adding XP.
-            # ------------------------------------------------
+        if new_level > old_level:
+            await self.handle_level_up(message, old_level, new_level, total_xp)
 
-            old_level = (
-                self.level_from_total_xp(
-                    stored_total_xp
-                )
-            )
+    async def handle_level_up(self, message, old_level, new_level, total_xp):
+        achievement = LEVEL_ACHIEVEMENTS.get(new_level)
 
-
-            # ------------------------------------------------
-            # Add XP to permanent total.
-            # ------------------------------------------------
-
-            total_xp = (
-                stored_total_xp
-                + xp_gain
-            )
-
-
-            # ------------------------------------------------
-            # Calculate the new level entirely from total XP.
-            #
-            # This is the important part:
-            #
-            # We NEVER manually subtract XP from the database
-            # and then increment/decrement the level.
-            #
-            # The level is always derived from total XP.
-            # ------------------------------------------------
-
-            new_level = (
-                self.level_from_total_xp(
-                    total_xp
-                )
-            )
-
-
-            # ------------------------------------------------
-            # XP inside current level.
-            # ------------------------------------------------
-
-            current_xp = (
-                self.current_level_xp(
-                    total_xp
-                )
-            )
-
-
-            # ------------------------------------------------
-            # Safety check.
-            #
-            # A user's level is never allowed to decrease
-            # from an XP gain.
-            # ------------------------------------------------
-
-            if new_level < old_level:
-
-                new_level = old_level
-
-                # This should never happen, but if it somehow
-                # does, preserve the user's current level.
-                current_xp = min(
-                    current_xp,
-                    XP_PER_LEVEL - 1
-                )
-
-
-            # ==================================================
-            # DETERMINE LEVELS GAINED
-            # ==================================================
-
-            levels_gained = []
-
-            if new_level > old_level:
-
-                for reached_level in range(
-                    old_level + 1,
-                    new_level + 1
-                ):
-
-                    levels_gained.append(
-                        reached_level
-                    )
-
-
-            # ==================================================
-            # SAVE EVERYTHING
-            # ==================================================
-
-            cursor.execute(
-                """
-                UPDATE levels
-                SET
-                    xp = ?,
-                    level = ?,
-                    total_xp = ?
-                WHERE user_id = ?
-                """,
-                (
-                    current_xp,
-                    new_level,
-                    total_xp,
-                    message.author.id
-                )
-            )
-
-
-            # ==================================================
-            # COMMIT
-            # ==================================================
-
-            db.commit()
-
-
-            # ==================================================
-            # NO LEVEL UP
-            # ==================================================
-
-            if not levels_gained:
-                return
-
-
-            # ==================================================
-            # ACHIEVEMENTS
-            # ==================================================
-
-            for reached_level in levels_gained:
-
-                if reached_level == 5:
-
-                    unlock(
-                        message.author.id,
-                        "⭐ Level 5"
-                    )
-
-                elif reached_level == 10:
-
-                    unlock(
-                        message.author.id,
-                        "⭐ Level 10"
-                    )
-
-                elif reached_level == 25:
-
-                    unlock(
-                        message.author.id,
-                        "⭐ Level 25"
-                    )
-
-                elif reached_level == 50:
-
-                    unlock(
-                        message.author.id,
-                        "🌟 Level 50"
-                    )
-
-                elif reached_level == 100:
-
-                    unlock(
-                        message.author.id,
-                        "👑 Level 100"
-                    )
-
-
-            # ==================================================
-            # FIND HIGHEST LEVEL ROLE
-            # ==================================================
-
-            final_role = None
-
-            cursor.execute(
-                """
-                SELECT role_id
-                FROM level_roles
-                WHERE guild_id = ?
-                AND level <= ?
-                ORDER BY level DESC
-                LIMIT 1
-                """,
-                (
-                    message.guild.id,
-                    new_level
-                )
-            )
-
-            role_result = cursor.fetchone()
-
-
-            if role_result:
-
-                final_role = message.guild.get_role(
-                    role_result["role_id"]
-                )
-
-
-            # ==================================================
-            # APPLY LEVEL ROLE
-            # ==================================================
-
-            if final_role:
-
-                try:
-
-                    # ------------------------------------------
-                    # Find lower configured level roles.
-                    # ------------------------------------------
-
-                    cursor.execute(
+        if achievement:
+            try:
+                with sqlite3.connect(DB_PATH) as conn:
+                    conn.execute(
                         """
-                        SELECT role_id
-                        FROM level_roles
-                        WHERE guild_id = ?
-                        AND level < ?
-                        """,
-                        (
-                            message.guild.id,
-                            new_level
+                        CREATE TABLE IF NOT EXISTS achievements (
+                            user_id INTEGER NOT NULL,
+                            achievement TEXT NOT NULL,
+                            unlocked_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                            PRIMARY KEY (user_id, achievement)
                         )
+                        """
                     )
-
-                    old_role_rows = cursor.fetchall()
-
-                    roles_to_remove = []
-
-
-                    for row in old_role_rows:
-
-                        old_role = message.guild.get_role(
-                            row["role_id"]
-                        )
-
-                        if (
-                            old_role
-                            and old_role in message.author.roles
-                            and old_role != final_role
-                        ):
-
-                            roles_to_remove.append(
-                                old_role
-                            )
-
-
-                    # ------------------------------------------
-                    # Remove old level roles.
-                    # ------------------------------------------
-
-                    if roles_to_remove:
-
-                        await message.author.remove_roles(
-                            *roles_to_remove,
-                            reason=(
-                                f"Level progression "
-                                f"to Level {new_level}"
-                            )
-                        )
-
-
-                    # ------------------------------------------
-                    # Give new level role.
-                    # ------------------------------------------
-
-                    if final_role not in message.author.roles:
-
-                        await message.author.add_roles(
-                            final_role,
-                            reason=(
-                                f"Reached Level {new_level}"
-                            )
-                        )
-
-                except (
-                    discord.Forbidden,
-                    discord.HTTPException
-                ):
-
-                    pass
-
-
-            # ==================================================
-            # LEVEL-UP MESSAGE
-            # ==================================================
-
-            if len(levels_gained) == 1:
-
-                level_text = (
-                    f"**Level {levels_gained[0]}**"
-                )
-
-            else:
-
-                level_text = (
-                    f"**Level {old_level} → "
-                    f"Level {new_level}**"
-                )
-
-
-            embed = discord.Embed(
-                title="🎉 Level Up!",
-                description=(
-                    f"{message.author.mention} reached "
-                    f"{level_text}!"
-                ),
-                color=discord.Color.gold()
-            )
-
-
-            # ==================================================
-            # ROLE INFORMATION
-            # ==================================================
-
-            if final_role:
-
-                embed.add_field(
-                    name="🏅 Level Role",
-                    value=final_role.mention,
-                    inline=True
-                )
-
-
-            # ==================================================
-            # CURRENT XP
-            # ==================================================
-
-            xp_needed = self.xp_required(
-                new_level
-            )
-
-            embed.add_field(
-                name="⚡ XP",
-                value=(
-                    f"{current_xp}/{xp_needed}"
-                ),
-                inline=True
-            )
-
-
-            # ==================================================
-            # TOTAL XP
-            # ==================================================
-
-            embed.add_field(
-                name="📊 Total XP",
-                value=f"{total_xp:,}",
-                inline=True
-            )
-
-
-            # ==================================================
-            # SEND LEVEL-UP MESSAGE
-            # ==================================================
-
-            try:
-
-                await message.channel.send(
-                    embed=embed
-                )
-
-            except (
-                discord.Forbidden,
-                discord.HTTPException
-            ):
-
-                pass
-
-        except sqlite3.Error:
-
-            # ------------------------------------------------
-            # If anything goes wrong with the transaction,
-            # roll it back so partial XP/level changes cannot
-            # remain in the database.
-            # ------------------------------------------------
-
-            try:
-                db.rollback()
-            except sqlite3.Error:
-                pass
-
-            raise
-
-        finally:
-
-            db.close()
-
-
-    # ======================================================
-    # !RANK
-    # ======================================================
-
-    @commands.command()
-    async def rank(
-        self,
-        ctx
-    ):
-
-        data = self.get_user_data(
-            ctx.author.id
-        )
-
-
-        if data is None:
-
-            return await ctx.send(
-                "You don't have any XP yet."
-            )
-
-
-        xp = int(data["xp"])
-        level = int(data["level"])
-        total_xp = int(data["total_xp"])
-
-
-        xp_needed = self.xp_required(
-            level
-        )
-
-
-        # --------------------------------------------------
-        # Progress bar
-        # --------------------------------------------------
-
-        percent = min(
-            int(
-                (xp / xp_needed) * 10
-            ),
-            10
-        )
-
-
-        bar = (
-            "█" * percent
-            + "░" * (10 - percent)
-        )
-
+                    conn.execute(
+                        """
+                        INSERT OR IGNORE INTO achievements (user_id, achievement)
+                        VALUES (?, ?)
+                        """,
+                        (message.author.id, achievement),
+                    )
+                    conn.commit()
+            except sqlite3.Error as error:
+                print(f"[LEVELING] Achievement error: {error}")
+
+        await self.sync_level_roles(message.author, message.guild, new_level)
+
+        current_xp, required_xp = progress_from_total_xp(total_xp)
 
         embed = discord.Embed(
-            title=(
-                f"⭐ "
-                f"{ctx.author.display_name}'s Rank"
-            ),
-            color=EMBED_COLOR
+            title="🎉 Level Up!",
+            description=f"{message.author.mention} reached **Level {new_level}**!",
+            color=discord.Color.blurple(),
         )
-
-
-        embed.set_thumbnail(
-            url=ctx.author.display_avatar.url
-        )
-
-
+        embed.set_thumbnail(url=message.author.display_avatar.url)
+        embed.add_field(name="Previous Level", value=f"Level {old_level}", inline=True)
+        embed.add_field(name="New Level", value=f"Level {new_level}", inline=True)
+        embed.add_field(name="Total XP", value=f"{total_xp:,}", inline=True)
         embed.add_field(
-            name="⭐ Level",
-            value=level,
-            inline=True
+            name="Next Level",
+            value=f"{current_xp:,} / {required_xp:,} XP",
+            inline=False,
         )
-
-
-        embed.add_field(
-            name="⚡ XP",
-            value=f"{xp}/{xp_needed}",
-            inline=True
-        )
-
-
-        embed.add_field(
-            name="📊 Total XP",
-            value=f"{total_xp:,}",
-            inline=True
-        )
-
-
-        embed.add_field(
-            name="📈 Progress",
-            value=bar,
-            inline=False
-        )
-
-
-        await ctx.send(
-            embed=embed
-        )
-
-
-    # ======================================================
-    # !SETLEVELROLE
-    # ======================================================
-
-    @commands.command()
-    @commands.has_permissions(
-        administrator=True
-    )
-    async def setlevelrole(
-        self,
-        ctx,
-        level: int,
-        role: discord.Role
-    ):
-
-        if ctx.guild is None:
-
-            return await ctx.send(
-                "❌ This command can only be used in a server."
-            )
-
-
-        if level < 1:
-
-            return await ctx.send(
-                "❌ Level must be 1 or higher."
-            )
-
-
-        # --------------------------------------------------
-        # Bot role hierarchy check
-        # --------------------------------------------------
-
-        if role >= ctx.guild.me.top_role:
-
-            return await ctx.send(
-                "❌ I can't manage that role because it is "
-                "higher than or equal to my highest role."
-            )
-
-
-        # --------------------------------------------------
-        # Prevent @everyone
-        # --------------------------------------------------
-
-        if role == ctx.guild.default_role:
-
-            return await ctx.send(
-                "❌ You can't use the @everyone role."
-            )
-
-
-        db = get_db()
+        embed.set_footer(text="Keep chatting to earn more XP!")
 
         try:
+            await message.channel.send(embed=embed)
+        except discord.HTTPException:
+            pass
 
-            cursor = db.cursor()
-
+    async def sync_level_roles(self, member, guild, level):
+        with sqlite3.connect(DB_PATH) as conn:
+            cursor = conn.cursor()
             cursor.execute(
                 """
-                INSERT OR REPLACE INTO level_roles (
-                    guild_id,
-                    level,
-                    role_id
+                CREATE TABLE IF NOT EXISTS level_roles (
+                    guild_id INTEGER NOT NULL,
+                    level INTEGER NOT NULL,
+                    role_id INTEGER NOT NULL,
+                    PRIMARY KEY (guild_id, level)
                 )
-                VALUES (?, ?, ?)
-                """,
-                (
-                    ctx.guild.id,
-                    level,
-                    role.id
-                )
+                """
             )
+            cursor.execute(
+                """
+                SELECT level, role_id FROM level_roles
+                WHERE guild_id = ? ORDER BY level ASC
+                """,
+                (guild.id,),
+            )
+            rows = cursor.fetchall()
 
-            db.commit()
+        if not rows:
+            return
 
-        finally:
+        earned_roles = []
+        role_levels = {}
 
-            db.close()
+        for role_level, role_id in rows:
+            role_levels[role_id] = role_level
+            if level >= role_level:
+                role = guild.get_role(role_id)
+                if role is not None:
+                    earned_roles.append(role)
 
+        if not earned_roles:
+            return
+
+        highest_role = max(earned_roles, key=lambda role: role_levels.get(role.id, 0))
+        roles_to_remove = [
+            role for role in earned_roles
+            if role.id != highest_role.id and role in member.roles
+        ]
+
+        try:
+            if roles_to_remove:
+                await member.remove_roles(*roles_to_remove, reason="Level role progression")
+            if highest_role not in member.roles:
+                await member.add_roles(highest_role, reason="Level role progression")
+        except discord.HTTPException as error:
+            print(f"[LEVELING] Could not update roles for {member}: {error}")
+
+    @commands.command(name="rank")
+    async def rank(self, ctx: commands.Context):
+        data = self.get_user_data(ctx.author.id)
+
+        if data is None:
+            data = {
+                "xp": 0,
+                "level": 1,
+                "total_xp": 0,
+                "required": BASE_XP_REQUIRED,
+            }
+
+        current_xp = data["xp"]
+        level = data["level"]
+        total_xp = data["total_xp"]
+        required_xp = data["required"]
+
+        percent = (current_xp / required_xp) * 100 if required_xp else 0
+        bar_length = 15
+        filled = min(bar_length, int((current_xp / required_xp) * bar_length) if required_xp else 0)
+        progress_bar = "█" * filled + "░" * (bar_length - filled)
 
         embed = discord.Embed(
-            title="✅ Level Role Added",
-            description=(
-                f"Members will receive "
-                f"{role.mention}\n"
-                f"when they reach **Level {level}**."
+            title=f"⚡ {ctx.author.display_name}'s Rank",
+            color=discord.Color.blurple(),
+        )
+        embed.set_thumbnail(url=ctx.author.display_avatar.url)
+        embed.add_field(name="Level", value=f"**{level}**", inline=True)
+        embed.add_field(name="Total XP", value=f"**{total_xp:,}**", inline=True)
+        embed.add_field(
+            name="Progress",
+            value=(
+                f"`{progress_bar}`\n"
+                f"**{current_xp:,} / {required_xp:,} XP** ({percent:.1f}%)"
             ),
-            color=discord.Color.green()
+            inline=False,
         )
+        await ctx.send(embed=embed)
 
+    @commands.command(name="setlevelrole")
+    @commands.has_permissions(administrator=True)
+    async def set_level_role(self, ctx: commands.Context, level: int, role: discord.Role):
+        if level < 1:
+            return await ctx.send("❌ Level must be 1 or higher.")
 
-        await ctx.send(
-            embed=embed
-        )
-
-
-    # ======================================================
-    # ERROR HANDLER - SET LEVEL ROLE
-    # ======================================================
-
-    @setlevelrole.error
-    async def setlevelrole_error(
-        self,
-        ctx,
-        error
-    ):
-
-        if isinstance(
-            error,
-            commands.MissingPermissions
-        ):
-
-            await ctx.send(
-                "❌ You need Administrator permission "
-                "to use this command."
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS level_roles (
+                    guild_id INTEGER NOT NULL,
+                    level INTEGER NOT NULL,
+                    role_id INTEGER NOT NULL,
+                    PRIMARY KEY (guild_id, level)
+                )
+                """
             )
-
-        elif isinstance(
-            error,
-            commands.MissingRequiredArgument
-        ):
-
-            await ctx.send(
-                "❌ Usage: `!setlevelrole <level> @role`"
+            conn.execute(
+                """
+                INSERT INTO level_roles (guild_id, level, role_id)
+                VALUES (?, ?, ?)
+                ON CONFLICT(guild_id, level)
+                DO UPDATE SET role_id = excluded.role_id
+                """,
+                (ctx.guild.id, level, role.id),
             )
+            conn.commit()
 
-        elif isinstance(
-            error,
-            commands.BadArgument
-        ):
+        await ctx.send(f"✅ **Level {level}** will now give {role.mention}.")
 
-            await ctx.send(
-                "❌ Make sure the level is a number and "
-                "you mention a valid Discord role."
-            )
+    @set_level_role.error
+    async def set_level_role_error(self, ctx: commands.Context, error: commands.CommandError):
+        if isinstance(error, commands.MissingPermissions):
+            return await ctx.send("❌ You need Administrator permission to use this command.")
+        if isinstance(error, commands.BadArgument):
+            return await ctx.send("❌ Usage: `!setlevelrole <level> @role`")
+        raise error
 
 
-# ==========================================================
-# SETUP
-# ==========================================================
-
-async def setup(bot):
-
-    await bot.add_cog(
-        Leveling(bot)
-    )
+async def setup(bot: commands.Bot):
+    await bot.add_cog(Leveling(bot))
