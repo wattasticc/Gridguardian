@@ -335,6 +335,10 @@ async def load_cogs():
     await bot.load_extension("cogs.apexpatch")
     print("🔴 Apex Patch Loaded")
 
+    print("Loading Mastery Rewards...")
+    await bot.load_extension("cogs.masteryrewards")
+    print("⚡ Mastery Rewards Loaded")
+
     print("Loading Wattson Mastery...")
     await bot.load_extension("cogs.wattsonmastery")
     print("⚡ Wattson Mastery Loaded")
@@ -355,13 +359,25 @@ async def load_cogs():
     await bot.load_extension("cogs.coach")
     print("✅ Coach Loaded")
 
-    print("Loading Profile...")
+    print("Loading Profile System...")
     await bot.load_extension("cogs.profile")
-    print("✅ Profile Loaded")
+    print("⚡ Profile System Loaded")
 
     print("Loading Stats...")
     await bot.load_extension("cogs.stats")
     print("✅ Stats Loaded")
+
+    print("Loading Achievement System...")
+    await bot.load_extension("cogs.achievement_system")
+    print("🏆 Achievement System Loaded")
+
+    print("Loading Progression Roles...")
+    await bot.load_extension("cogs.progression_roles")
+    print("⚡ Progression Roles Loaded")
+
+    print("Loading Daily Quests...")
+    await bot.load_extension("cogs.daily_quests")
+    print("⚡ Daily Quests Loaded")
 
     print("Loading Roles...")
     await bot.load_extension("cogs.roles")
@@ -375,10 +391,6 @@ async def load_cogs():
     await bot.load_extension("cogs.afk")
     print("✅ AFK Loaded")
 
-    print("Loading Achievements...")
-    await bot.load_extension("cogs.achievements")
-    print("✅ Achievements Loaded")
-
     print("Loading Quests...")
     await bot.load_extension("cogs.quests")
     print("✅ Quests Loaded")
@@ -386,6 +398,30 @@ async def load_cogs():
     print("Loading Notifications...")
     await bot.load_extension("cogs.notifications")
     print("✅ Notifications Loaded")
+
+    print("Loading Apex LFG...")
+    await bot.load_extension("cogs.lfg")
+    print("🎯 Apex LFG Loaded")
+
+    print("Loading Clip Showcase...")
+    await bot.load_extension("cogs.clips")
+    print("🎬 Clip Showcase Loaded")
+
+    print("Loading Weapon Comparison...")
+    await bot.load_extension("cogs.weaponcompare")
+    print("🔫 Weapon Comparison Loaded")
+
+    print("Loading Legend Matchups...")
+    await bot.load_extension("cogs.matchups")
+    print("🧙 Legend Matchups Loaded")
+
+    print("Loading Wattson Guide Database...")
+    await bot.load_extension("cogs.wattsonguides")
+    print("⚡ Wattson Guide Database Loaded")
+
+    print("Loading Tournament Manager...")
+    await bot.load_extension("cogs.tournaments")
+    print("🏆 Tournament Manager Loaded")
 
     print("Loading YouTube...")
     await bot.load_extension("cogs.youtube")
@@ -438,6 +474,14 @@ async def load_cogs():
     print("Loading Wattson Setup Library...")
     await bot.load_extension("cogs.setups")
     print("⚡ Wattson Setup Library Loaded")
+
+    print("Loading Leaderboards...")
+    await bot.load_extension("cogs.leaderboards")
+    print("🏆 Leaderboards Loaded")
+
+    print("Loading Challenges...")
+    await bot.load_extension("cogs.challenges")
+    print("⚡ Challenges Loaded")
 
     print("Loading Legends...")
     await bot.load_extension("cogs.legends")
