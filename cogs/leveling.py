@@ -23,13 +23,13 @@ XP_COOLDOWN = 60
 MIN_XP_GAIN = 5
 MAX_XP_GAIN = 15
 
-# XP required for EACH level.
+# Every level requires the same amount of XP.
 #
 # Level 1 -> Level 2 = 100 XP
 # Level 2 -> Level 3 = 100 XP
 # Level 3 -> Level 4 = 100 XP
 #
-# Extra XP is carried over after a level-up.
+# Total XP is stored permanently.
 XP_PER_LEVEL = 100
 
 
@@ -93,17 +93,98 @@ def initialize_database():
         """)
 
         # --------------------------------------------------
-        # Level roles
+        # Add total_xp if this is an existing database.
         # --------------------------------------------------
 
-        cursor.execute("""
-            CREATE TABLE IF NOT EXISTS level_roles (
-                guild_id INTEGER,
-                level INTEGER,
-                role_id INTEGER,
-                PRIMARY KEY (guild_id, level)
+        cursor.execute(
+            "PRAGMA table_info(levels)"
+        )
+
+        columns = {
+            row["name"]
+            for row in cursor.fetchall()
+        }
+
+        if "total_xp" not in columns:
+
+            cursor.execute(
+                """
+                ALTER TABLE levels
+                ADD COLUMN total_xp INTEGER DEFAULT 0
+                """
             )
-        """)
+
+        # --------------------------------------------------
+        # Migrate existing users.
+        #
+        # The old system stored:
+        #
+        #     level
+        #     xp inside that level
+        #
+        # Example:
+        #
+        # Level 6 + 37 XP
+        #
+        # becomes:
+        #
+        # Total XP = 537
+        #
+        # This preserves their progress.
+        # --------------------------------------------------
+
+        cursor.execute(
+            """
+            SELECT
+                user_id,
+                xp,
+                level,
+                total_xp
+            FROM levels
+            """
+        )
+
+        existing_users = cursor.fetchall()
+
+        for user in existing_users:
+
+            user_id = int(user["user_id"])
+
+            old_xp = max(
+                0,
+                int(user["xp"] or 0)
+            )
+
+            old_level = max(
+                1,
+                int(user["level"] or 1)
+            )
+
+            current_total = user["total_xp"]
+
+            # ----------------------------------------------
+            # Only migrate rows that don't already have a
+            # meaningful total XP value.
+            # ----------------------------------------------
+
+            if current_total is None or int(current_total) <= 0:
+
+                total_xp = (
+                    (old_level - 1) * XP_PER_LEVEL
+                    + old_xp
+                )
+
+                cursor.execute(
+                    """
+                    UPDATE levels
+                    SET total_xp = ?
+                    WHERE user_id = ?
+                    """,
+                    (
+                        total_xp,
+                        user_id
+                    )
+                )
 
         db.commit()
 
@@ -127,32 +208,80 @@ class Leveling(commands.Cog):
 
         # --------------------------------------------------
         # User ID -> timestamp
+        #
+        # This is only a message XP cooldown.
+        # It does NOT control level progression.
         # --------------------------------------------------
 
         self.cooldowns = {}
 
 
     # ======================================================
-    # XP REQUIRED
+    # LEVEL FROM TOTAL XP
+    # ======================================================
+
+    @staticmethod
+    def level_from_total_xp(total_xp: int) -> int:
+        """
+        Calculate a user's level from their permanent
+        total XP value.
+
+        Examples:
+
+        0 XP   -> Level 1
+        99 XP  -> Level 1
+        100 XP -> Level 2
+        199 XP -> Level 2
+        200 XP -> Level 3
+        500 XP -> Level 6
+        600 XP -> Level 7
+
+        The level can never go backward unless total XP
+        itself is deliberately reduced.
+        """
+
+        total_xp = max(
+            0,
+            int(total_xp)
+        )
+
+        return (
+            total_xp // XP_PER_LEVEL
+        ) + 1
+
+
+    # ======================================================
+    # XP REQUIRED FOR NEXT LEVEL
     # ======================================================
 
     @staticmethod
     def xp_required(level: int) -> int:
         """
-        Return the XP required to move from the current
-        level to the next level.
+        XP required for the next level.
 
-        Every level requires the same amount of XP.
-
-        Examples:
-
-        Level 1 -> Level 2 = 100 XP
-        Level 2 -> Level 3 = 100 XP
-        Level 7 -> Level 8 = 100 XP
-        Level 8 -> Level 9 = 100 XP
+        Every level requires the same amount.
         """
 
         return XP_PER_LEVEL
+
+
+    # ======================================================
+    # XP INSIDE CURRENT LEVEL
+    # ======================================================
+
+    @staticmethod
+    def current_level_xp(total_xp: int) -> int:
+        """
+        Return the XP progress inside the user's
+        current level.
+        """
+
+        total_xp = max(
+            0,
+            int(total_xp)
+        )
+
+        return total_xp % XP_PER_LEVEL
 
 
     # ======================================================
@@ -170,7 +299,11 @@ class Leveling(commands.Cog):
 
             cursor.execute(
                 """
-                SELECT xp, level
+                SELECT
+                    user_id,
+                    xp,
+                    level,
+                    total_xp
                 FROM levels
                 WHERE user_id = ?
                 """,
@@ -179,7 +312,73 @@ class Leveling(commands.Cog):
                 )
             )
 
-            return cursor.fetchone()
+            data = cursor.fetchone()
+
+            if data is None:
+                return None
+
+            # ------------------------------------------------
+            # Always derive the level from total XP.
+            #
+            # This protects against an old/inconsistent
+            # level value sitting in the database.
+            # ------------------------------------------------
+
+            total_xp = max(
+                0,
+                int(data["total_xp"] or 0)
+            )
+
+            calculated_level = (
+                Leveling.level_from_total_xp(
+                    total_xp
+                )
+            )
+
+            current_xp = (
+                Leveling.current_level_xp(
+                    total_xp
+                )
+            )
+
+            # ------------------------------------------------
+            # If the legacy columns are incorrect, repair
+            # them while we're here.
+            # ------------------------------------------------
+
+            if (
+                int(data["level"] or 1)
+                != calculated_level
+                or
+                int(data["xp"] or 0)
+                != current_xp
+            ):
+
+                cursor.execute(
+                    """
+                    UPDATE levels
+                    SET
+                        xp = ?,
+                        level = ?,
+                        total_xp = ?
+                    WHERE user_id = ?
+                    """,
+                    (
+                        current_xp,
+                        calculated_level,
+                        total_xp,
+                        user_id
+                    )
+                )
+
+                db.commit()
+
+            return {
+                "user_id": user_id,
+                "xp": current_xp,
+                "level": calculated_level,
+                "total_xp": total_xp
+            }
 
         finally:
 
@@ -241,15 +440,27 @@ class Leveling(commands.Cog):
         )
 
 
-        # --------------------------------------------------
-        # Database
-        # --------------------------------------------------
+        # ==================================================
+        # DATABASE
+        # ==================================================
 
         db = get_db()
 
         try:
 
             cursor = db.cursor()
+
+            # ------------------------------------------------
+            # BEGIN IMMEDIATE
+            #
+            # This prevents two simultaneous XP updates from
+            # reading the same old value and overwriting each
+            # other.
+            # ------------------------------------------------
+
+            cursor.execute(
+                "BEGIN IMMEDIATE"
+            )
 
 
             # ==================================================
@@ -258,7 +469,11 @@ class Leveling(commands.Cog):
 
             cursor.execute(
                 """
-                SELECT xp, level
+                SELECT
+                    user_id,
+                    xp,
+                    level,
+                    total_xp
                 FROM levels
                 WHERE user_id = ?
                 """,
@@ -276,19 +491,35 @@ class Leveling(commands.Cog):
 
             if data is None:
 
+                total_xp = xp_gain
+
+                level = (
+                    self.level_from_total_xp(
+                        total_xp
+                    )
+                )
+
+                current_xp = (
+                    self.current_level_xp(
+                        total_xp
+                    )
+                )
+
                 cursor.execute(
                     """
                     INSERT INTO levels (
                         user_id,
                         xp,
-                        level
+                        level,
+                        total_xp
                     )
-                    VALUES (?, ?, ?)
+                    VALUES (?, ?, ?, ?)
                     """,
                     (
                         message.author.id,
-                        xp_gain,
-                        1
+                        current_xp,
+                        level,
+                        total_xp
                     )
                 )
 
@@ -301,51 +532,126 @@ class Leveling(commands.Cog):
             # EXISTING USER
             # ==================================================
 
-            xp = int(data["xp"])
-            level = int(data["level"])
+            stored_total_xp = data["total_xp"]
+
+            # ------------------------------------------------
+            # Safety fallback for an old row.
+            # ------------------------------------------------
+
+            if stored_total_xp is None:
+
+                old_xp = max(
+                    0,
+                    int(data["xp"] or 0)
+                )
+
+                old_level = max(
+                    1,
+                    int(data["level"] or 1)
+                )
+
+                stored_total_xp = (
+                    (old_level - 1) * XP_PER_LEVEL
+                    + old_xp
+                )
+
+            else:
+
+                stored_total_xp = max(
+                    0,
+                    int(stored_total_xp)
+                )
 
 
-            # --------------------------------------------------
-            # Add XP
-            # --------------------------------------------------
+            # ------------------------------------------------
+            # Save the level BEFORE adding XP.
+            # ------------------------------------------------
 
-            xp += xp_gain
-
-
-            # --------------------------------------------------
-            # Save original level
-            # --------------------------------------------------
-
-            old_level = level
-
-            levels_gained = []
+            old_level = (
+                self.level_from_total_xp(
+                    stored_total_xp
+                )
+            )
 
 
-            # ==================================================
-            # PROCESS LEVEL UPS
-            # ==================================================
+            # ------------------------------------------------
+            # Add XP to permanent total.
+            # ------------------------------------------------
 
-            while xp >= self.xp_required(level):
+            total_xp = (
+                stored_total_xp
+                + xp_gain
+            )
 
-                required_xp = self.xp_required(level)
 
-                # ----------------------------------------------
-                # Subtract only the XP needed for this level.
-                #
-                # Any remaining XP is preserved.
-                # ----------------------------------------------
+            # ------------------------------------------------
+            # Calculate the new level entirely from total XP.
+            #
+            # This is the important part:
+            #
+            # We NEVER manually subtract XP from the database
+            # and then increment/decrement the level.
+            #
+            # The level is always derived from total XP.
+            # ------------------------------------------------
 
-                xp -= required_xp
+            new_level = (
+                self.level_from_total_xp(
+                    total_xp
+                )
+            )
 
-                level += 1
 
-                levels_gained.append(
-                    level
+            # ------------------------------------------------
+            # XP inside current level.
+            # ------------------------------------------------
+
+            current_xp = (
+                self.current_level_xp(
+                    total_xp
+                )
+            )
+
+
+            # ------------------------------------------------
+            # Safety check.
+            #
+            # A user's level is never allowed to decrease
+            # from an XP gain.
+            # ------------------------------------------------
+
+            if new_level < old_level:
+
+                new_level = old_level
+
+                # This should never happen, but if it somehow
+                # does, preserve the user's current level.
+                current_xp = min(
+                    current_xp,
+                    XP_PER_LEVEL - 1
                 )
 
 
             # ==================================================
-            # SAVE XP + LEVEL
+            # DETERMINE LEVELS GAINED
+            # ==================================================
+
+            levels_gained = []
+
+            if new_level > old_level:
+
+                for reached_level in range(
+                    old_level + 1,
+                    new_level + 1
+                ):
+
+                    levels_gained.append(
+                        reached_level
+                    )
+
+
+            # ==================================================
+            # SAVE EVERYTHING
             # ==================================================
 
             cursor.execute(
@@ -353,15 +659,22 @@ class Leveling(commands.Cog):
                 UPDATE levels
                 SET
                     xp = ?,
-                    level = ?
+                    level = ?,
+                    total_xp = ?
                 WHERE user_id = ?
                 """,
                 (
-                    xp,
-                    level,
+                    current_xp,
+                    new_level,
+                    total_xp,
                     message.author.id
                 )
             )
+
+
+            # ==================================================
+            # COMMIT
+            # ==================================================
 
             db.commit()
 
@@ -433,7 +746,7 @@ class Leveling(commands.Cog):
                 """,
                 (
                     message.guild.id,
-                    level
+                    new_level
                 )
             )
 
@@ -468,7 +781,7 @@ class Leveling(commands.Cog):
                         """,
                         (
                             message.guild.id,
-                            level
+                            new_level
                         )
                     )
 
@@ -504,7 +817,7 @@ class Leveling(commands.Cog):
                             *roles_to_remove,
                             reason=(
                                 f"Level progression "
-                                f"to Level {level}"
+                                f"to Level {new_level}"
                             )
                         )
 
@@ -518,7 +831,7 @@ class Leveling(commands.Cog):
                         await message.author.add_roles(
                             final_role,
                             reason=(
-                                f"Reached Level {level}"
+                                f"Reached Level {new_level}"
                             )
                         )
 
@@ -544,7 +857,7 @@ class Leveling(commands.Cog):
 
                 level_text = (
                     f"**Level {old_level} → "
-                    f"Level {level}**"
+                    f"Level {new_level}**"
                 )
 
 
@@ -576,14 +889,25 @@ class Leveling(commands.Cog):
             # ==================================================
 
             xp_needed = self.xp_required(
-                level
+                new_level
             )
 
             embed.add_field(
                 name="⚡ XP",
                 value=(
-                    f"{xp}/{xp_needed}"
+                    f"{current_xp}/{xp_needed}"
                 ),
+                inline=True
+            )
+
+
+            # ==================================================
+            # TOTAL XP
+            # ==================================================
+
+            embed.add_field(
+                name="📊 Total XP",
+                value=f"{total_xp:,}",
                 inline=True
             )
 
@@ -604,6 +928,21 @@ class Leveling(commands.Cog):
             ):
 
                 pass
+
+        except sqlite3.Error:
+
+            # ------------------------------------------------
+            # If anything goes wrong with the transaction,
+            # roll it back so partial XP/level changes cannot
+            # remain in the database.
+            # ------------------------------------------------
+
+            try:
+                db.rollback()
+            except sqlite3.Error:
+                pass
+
+            raise
 
         finally:
 
@@ -634,6 +973,7 @@ class Leveling(commands.Cog):
 
         xp = int(data["xp"])
         level = int(data["level"])
+        total_xp = int(data["total_xp"])
 
 
         xp_needed = self.xp_required(
@@ -683,6 +1023,13 @@ class Leveling(commands.Cog):
         embed.add_field(
             name="⚡ XP",
             value=f"{xp}/{xp_needed}",
+            inline=True
+        )
+
+
+        embed.add_field(
+            name="📊 Total XP",
+            value=f"{total_xp:,}",
             inline=True
         )
 
