@@ -1,6 +1,6 @@
+import random
 import sqlite3
 import time
-import random
 
 import discord
 from discord.ext import commands
@@ -11,6 +11,10 @@ XP_COOLDOWN = 60
 XP_MIN = 5
 XP_MAX = 15
 
+# Current progression:
+# Level 1 -> 2: 100 XP
+# Level 2 -> 3: 125 XP
+# Level 3 -> 4: 150 XP
 BASE_XP_REQUIRED = 100
 XP_INCREASE_PER_LEVEL = 25
 
@@ -52,6 +56,25 @@ def progress_from_total_xp(total_xp: int) -> tuple[int, int]:
     return remaining, xp_required_for_level(level)
 
 
+def legacy_total_xp_from_level(level: int, xp: int) -> int:
+    """Convert the previous level*100 progression into cumulative XP.
+
+    The previous live leveling file used:
+        Level 1 -> 100 XP
+        Level 2 -> 200 XP
+        Level 3 -> 300 XP
+        ...
+
+    Therefore the XP required to reach a level was the sum of all
+    previous level thresholds, not simply (level - 1) * 100.
+    """
+    level = max(1, int(level))
+    xp = max(0, int(xp))
+    completed_levels = level - 1
+    cumulative = 100 * completed_levels * (completed_levels + 1) // 2
+    return cumulative + xp
+
+
 class Leveling(commands.Cog):
     """XP, levels, ranks, achievements, and level roles."""
 
@@ -83,7 +106,8 @@ class Leveling(commands.Cog):
                     "ALTER TABLE levels ADD COLUMN total_xp INTEGER DEFAULT 0"
                 )
 
-            # Migrate users from the old fixed-100 XP system.
+            # One-time migration for rows created by the old level*100 system.
+            # Do not touch rows that already have authoritative total_xp.
             cursor.execute(
                 "SELECT user_id, xp, level, total_xp FROM levels"
             )
@@ -94,7 +118,10 @@ class Leveling(commands.Cog):
                 stored_total_xp = int(stored_total_xp or 0)
 
                 if stored_total_xp == 0 and (old_level > 1 or old_xp > 0):
-                    migrated_total_xp = ((old_level - 1) * 100) + old_xp
+                    migrated_total_xp = legacy_total_xp_from_level(
+                        old_level,
+                        old_xp,
+                    )
                     cursor.execute(
                         "UPDATE levels SET total_xp = ? WHERE user_id = ?",
                         (migrated_total_xp, user_id),
@@ -116,6 +143,8 @@ class Leveling(commands.Cog):
 
             old_xp, stored_level, total_xp = row
             total_xp = max(0, int(total_xp or 0))
+
+            # total_xp is the single source of truth from here on.
             level = level_from_total_xp(total_xp)
             current_xp, required_xp = progress_from_total_xp(total_xp)
 
@@ -151,58 +180,68 @@ class Leveling(commands.Cog):
         if now - self.xp_cooldowns.get(user_id, 0) < XP_COOLDOWN:
             return
 
-        self.xp_cooldowns[user_id] = now
         xp_gain = random.randint(XP_MIN, XP_MAX)
 
-        with sqlite3.connect(DB_PATH, timeout=10) as conn:
-            cursor = conn.cursor()
-            cursor.execute("BEGIN IMMEDIATE")
+        try:
+            with sqlite3.connect(DB_PATH, timeout=10) as conn:
+                cursor = conn.cursor()
+                cursor.execute("BEGIN IMMEDIATE")
 
-            cursor.execute(
-                "SELECT xp, level, total_xp FROM levels WHERE user_id = ?",
-                (user_id,),
-            )
-            row = cursor.fetchone()
-
-            if row is None:
-                old_level = 1
-                total_xp = xp_gain
-            else:
-                old_xp, stored_level, stored_total_xp = row
-                old_xp = max(0, int(old_xp or 0))
-                stored_level = max(1, int(stored_level or 1))
-                stored_total_xp = int(stored_total_xp or 0)
-
-                if stored_total_xp == 0 and (stored_level > 1 or old_xp > 0):
-                    stored_total_xp = ((stored_level - 1) * 100) + old_xp
-
-                total_xp = max(0, stored_total_xp)
-                old_level = level_from_total_xp(total_xp)
-                total_xp += xp_gain
-
-            new_level = level_from_total_xp(total_xp)
-            new_level = max(old_level, new_level)
-            current_xp, _ = progress_from_total_xp(total_xp)
-
-            if row is None:
                 cursor.execute(
-                    """
-                    INSERT INTO levels (user_id, xp, level, total_xp)
-                    VALUES (?, ?, ?, ?)
-                    """,
-                    (user_id, current_xp, new_level, total_xp),
+                    "SELECT xp, level, total_xp FROM levels WHERE user_id = ?",
+                    (user_id,),
                 )
-            else:
-                cursor.execute(
-                    """
-                    UPDATE levels
-                    SET xp = ?, level = ?, total_xp = ?
-                    WHERE user_id = ?
-                    """,
-                    (current_xp, new_level, total_xp, user_id),
-                )
+                row = cursor.fetchone()
 
-            conn.commit()
+                if row is None:
+                    old_level = 1
+                    total_xp = xp_gain
+                else:
+                    old_xp, stored_level, stored_total_xp = row
+                    old_xp = max(0, int(old_xp or 0))
+                    stored_level = max(1, int(stored_level or 1))
+                    stored_total_xp = int(stored_total_xp or 0)
+
+                    # Safety migration for any old row that has not yet been
+                    # migrated. This uses the previous level*100 system.
+                    if stored_total_xp == 0 and (stored_level > 1 or old_xp > 0):
+                        stored_total_xp = legacy_total_xp_from_level(
+                            stored_level,
+                            old_xp,
+                        )
+
+                    total_xp = max(0, stored_total_xp)
+                    old_level = level_from_total_xp(total_xp)
+                    total_xp += xp_gain
+
+                new_level = level_from_total_xp(total_xp)
+                current_xp, _ = progress_from_total_xp(total_xp)
+
+                if row is None:
+                    cursor.execute(
+                        """
+                        INSERT INTO levels (user_id, xp, level, total_xp)
+                        VALUES (?, ?, ?, ?)
+                        """,
+                        (user_id, current_xp, new_level, total_xp),
+                    )
+                else:
+                    cursor.execute(
+                        """
+                        UPDATE levels
+                        SET xp = ?, level = ?, total_xp = ?
+                        WHERE user_id = ?
+                        """,
+                        (current_xp, new_level, total_xp, user_id),
+                    )
+
+                conn.commit()
+        except sqlite3.Error as error:
+            # Only consume the cooldown after a successful database write.
+            print(f"[LEVELING] Database error for {user_id}: {error}")
+            return
+
+        self.xp_cooldowns[user_id] = now
 
         if new_level > old_level:
             await self.handle_level_up(message, old_level, new_level, total_xp)
@@ -312,6 +351,7 @@ class Leveling(commands.Cog):
             print(f"[LEVELING] Could not update roles for {member}: {error}")
 
     @commands.command(name="rank")
+    @commands.guild_only()
     async def rank(self, ctx: commands.Context):
         data = self.get_user_data(ctx.author.id)
 
@@ -330,7 +370,10 @@ class Leveling(commands.Cog):
 
         percent = (current_xp / required_xp) * 100 if required_xp else 0
         bar_length = 15
-        filled = min(bar_length, int((current_xp / required_xp) * bar_length) if required_xp else 0)
+        filled = min(
+            bar_length,
+            int((current_xp / required_xp) * bar_length) if required_xp else 0,
+        )
         progress_bar = "█" * filled + "░" * (bar_length - filled)
 
         embed = discord.Embed(
@@ -351,10 +394,19 @@ class Leveling(commands.Cog):
         await ctx.send(embed=embed)
 
     @commands.command(name="setlevelrole")
+    @commands.guild_only()
     @commands.has_permissions(administrator=True)
     async def set_level_role(self, ctx: commands.Context, level: int, role: discord.Role):
         if level < 1:
             return await ctx.send("❌ Level must be 1 or higher.")
+
+        if role == ctx.guild.default_role:
+            return await ctx.send("❌ You can't use the @everyone role.")
+
+        if ctx.guild.me and role >= ctx.guild.me.top_role:
+            return await ctx.send(
+                "❌ I can't manage that role because it is higher than or equal to my highest role."
+            )
 
         with sqlite3.connect(DB_PATH) as conn:
             conn.execute(
@@ -384,8 +436,10 @@ class Leveling(commands.Cog):
     async def set_level_role_error(self, ctx: commands.Context, error: commands.CommandError):
         if isinstance(error, commands.MissingPermissions):
             return await ctx.send("❌ You need Administrator permission to use this command.")
-        if isinstance(error, commands.BadArgument):
+        if isinstance(error, commands.MissingRequiredArgument):
             return await ctx.send("❌ Usage: `!setlevelrole <level> @role`")
+        if isinstance(error, commands.BadArgument):
+            return await ctx.send("❌ Make sure the level is a number and you mention a valid Discord role.")
         raise error
 
 

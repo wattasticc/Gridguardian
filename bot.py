@@ -112,7 +112,6 @@ async def load_cogs():
     await bot.load_extension("cogs.polls")
     await bot.load_extension("cogs.antiraid")
     await bot.load_extension("cogs.tempvoice")
-    await bot.load_extension("cogs.levelrewards")
     await bot.load_extension("cogs.daily")
     await bot.load_extension("cogs.weapons")
     await bot.load_extension("cogs.loadout")
