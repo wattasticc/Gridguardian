@@ -58,87 +58,29 @@ class Daily(commands.Cog):
     # =====================================================
 
     def add_money(self, guild_id, user_id, amount):
-
-        """
-        Supports the most common Grid Guardian economy
-        database layouts.
-        """
-
-        economy_tables = [
-            ("economy", "balance"),
-            ("users", "balance")
-        ]
-
-
-        for table, balance_column in economy_tables:
-
-            try:
-
-                cursor.execute(
-                    f"""
-                    SELECT {balance_column}
-                    FROM {table}
-                    WHERE guild_id=?
-                    AND user_id=?
-                    """,
-                    (
-                        guild_id,
-                        user_id
-                    )
-                )
-
-
-                result = cursor.fetchone()
-
-
-                if result is None:
-
-                    cursor.execute(
-                        f"""
-                        INSERT INTO {table}(
-                            guild_id,
-                            user_id,
-                            {balance_column}
-                        )
-                        VALUES (?, ?, ?)
-                        """,
-                        (
-                            guild_id,
-                            user_id,
-                            amount
-                        )
-                    )
-
-
-                else:
-
-                    cursor.execute(
-                        f"""
-                        UPDATE {table}
-                        SET {balance_column}
-                        = {balance_column} + ?
-                        WHERE guild_id=?
-                        AND user_id=?
-                        """,
-                        (
-                            amount,
-                            guild_id,
-                            user_id
-                        )
-                    )
-
-
-                db.commit()
-
-                return True
-
-
-            except sqlite3.Error:
-
-                continue
-
-
-        return False
+        # Economy uses wallet/bank, not a balance column.
+        try:
+            cursor.execute("""
+            CREATE TABLE IF NOT EXISTS economy (
+                user_id INTEGER NOT NULL, guild_id INTEGER NOT NULL,
+                wallet INTEGER DEFAULT 0, bank INTEGER DEFAULT 0,
+                last_work TEXT, last_beg TEXT,
+                PRIMARY KEY (user_id, guild_id)
+            )
+            """)
+            cursor.execute("""
+            INSERT OR IGNORE INTO economy (user_id, guild_id, wallet, bank)
+            VALUES (?, ?, 0, 0)
+            """, (user_id, guild_id))
+            cursor.execute("""
+            UPDATE economy SET wallet = wallet + ?
+            WHERE guild_id=? AND user_id=?
+            """, (amount, guild_id, user_id))
+            db.commit()
+            return True
+        except sqlite3.Error:
+            db.rollback()
+            return False
 
 
     # =====================================================

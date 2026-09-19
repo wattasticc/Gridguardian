@@ -54,89 +54,66 @@ def get_platform(platform):
     return platforms.get(platform.lower())
 
 
-def find_stat(data, stat_name):
+def _walk_dicts(value):
+    if isinstance(value, dict):
+        yield value
+        for child in value.values():
+            yield from _walk_dicts(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from _walk_dicts(child)
 
-    stat_name = stat_name.lower()
 
-    # ======================================================
-    # GLOBAL TRACKERS
-    # ======================================================
-
-    global_data = data.get(
-        "global",
-        {}
-    )
-
-    rank_data = global_data.get(
-        "rank",
-        {}
-    )
-
-    if stat_name in rank_data:
-
-        return rank_data.get(
-            stat_name
-        )
-
-    # ======================================================
-    # LEGEND TRACKERS
-    # ======================================================
-
-    legends = data.get(
-        "legends",
-        {}
-    )
-
-    all_legends = legends.get(
-        "all",
-        {}
-    )
-
-    for legend_data in all_legends.values():
-
-        if not isinstance(
-            legend_data,
-            dict
-        ):
-            continue
-
-        trackers = legend_data.get(
-            "data",
-            []
-        )
-
-        if not isinstance(
-            trackers,
-            list
-        ):
-            continue
-
-        for tracker in trackers:
-
-            name = str(
-                tracker.get(
-                    "name",
-                    ""
-                )
-            ).lower()
-
-            key = str(
-                tracker.get(
-                    "key",
-                    ""
-                )
-            ).lower()
-
-            if (
-                stat_name in name
-                or stat_name in key
-            ):
-
-                return tracker.get(
-                    "value"
-                )
-
+def _first_value(data, *keys):
+    wanted = {str(k).lower() for k in keys}
+    for obj in _walk_dicts(data):
+        for key, value in obj.items():
+            if str(key).lower() in wanted and value not in (None, ''):
+                return value
     return None
+
+
+def find_stat(data, stat_name):
+    stat_name = stat_name.lower()
+    for obj in _walk_dicts(data):
+        for key, value in obj.items():
+            key_text = str(key).lower()
+            if stat_name in key_text and isinstance(value, (int, float, str)):
+                return value
+        name = str(obj.get('name', '')).lower()
+        key = str(obj.get('key', '')).lower()
+        if stat_name in name or stat_name in key:
+            if 'value' in obj:
+                return obj.get('value')
+    return None
+
+
+def format_remaining(timestamp):
+    if timestamp is None:
+        return None
+    try:
+        from datetime import datetime, timezone
+        if isinstance(timestamp, (int, float)):
+            ts = float(timestamp)
+            if ts > 10_000_000_000:
+                ts /= 1000
+            target = datetime.fromtimestamp(ts, tz=timezone.utc)
+        else:
+            text = str(timestamp).strip().replace('Z', '+00:00')
+            target = datetime.fromisoformat(text)
+            if target.tzinfo is None:
+                target = target.replace(tzinfo=timezone.utc)
+        seconds = max(0, int((target - datetime.now(timezone.utc)).total_seconds()))
+        days, rem = divmod(seconds, 86400)
+        hours, rem = divmod(rem, 3600)
+        minutes, secs = divmod(rem, 60)
+        if days:
+            return f'{days}d {hours}h {minutes}m'
+        if hours:
+            return f'{hours}h {minutes}m {secs}s'
+        return f'{minutes}m {secs}s'
+    except Exception:
+        return None
 
 
 # ==========================================================
@@ -534,49 +511,19 @@ class Apex(commands.Cog):
                 "❌ The Apex API returned unexpected data."
             )
 
-        global_data = data.get(
-            "global",
-            {}
-        )
+        global_data = data.get("global", {}) if isinstance(data.get("global"), dict) else {}
+        rank_data = global_data.get("rank", {}) if isinstance(global_data.get("rank"), dict) else {}
 
-        rank_data = global_data.get(
-            "rank",
-            {}
-        )
-
-        rank_name = rank_data.get(
-            "rankName",
-            "Unranked"
-        )
-
-        rank_division = rank_data.get(
-            "rankDiv",
-            ""
-        )
-
-        rank_score = rank_data.get(
-            "rankScore",
-            0
-        )
-
-        level = global_data.get(
-            "level",
-            "Unknown"
-        )
-
-        player_name = global_data.get(
-            "name",
-            player
-        )
-
-        platform_name = global_data.get(
-            "platform",
-            converted_platform
-        )
-
-        avatar = global_data.get(
-            "avatar"
-        )
+        rank_name = (rank_data.get("rankName") or rank_data.get("rank") or
+                     _first_value(data, "rankName", "rank_name") or "Unranked")
+        rank_division = (rank_data.get("rankDiv") or rank_data.get("division") or
+                         _first_value(data, "rankDiv", "rankDivision", "division") or "")
+        rank_score = (rank_data.get("rankScore") or rank_data.get("rankedScore") or
+                      rank_data.get("score") or _first_value(data, "rankScore", "rankedScore", "RP", "AP") or 0)
+        level = global_data.get("level") or _first_value(data, "level") or "Unknown"
+        player_name = global_data.get("name") or _first_value(data, "name", "playerName") or player
+        platform_name = global_data.get("platform") or converted_platform
+        avatar = global_data.get("avatar")
 
         kills = find_stat(
             data,
@@ -672,141 +619,48 @@ class Apex(commands.Cog):
 
     @commands.command(
         name="apexmap",
-        aliases=[
-            "maprotation",
-            "maps",
-            "map"
-        ]
+        aliases=["maprotation", "maps", "map"]
     )
     async def apexmap(self, ctx):
-
         async with ctx.typing():
-
-            # The .php endpoint is included because the
-            # server shown in your Railway logs is currently
-            # advertising it as an available variant.
             data, error = await self.api_request(
-                "/maprotation.php",
-                {
-                    "version": 2
-                },
-                fallback_endpoint="/maprotation"
+                "/maprotation.php", {"version": 2}, fallback_endpoint="/maprotation"
             )
-
         if error:
-
             return await ctx.send(error)
-
-        if not isinstance(
-            data,
-            dict
-        ):
-
-            return await ctx.send(
-                "❌ The Apex API returned unexpected "
-                "map rotation data."
-            )
+        if not isinstance(data, dict):
+            return await ctx.send("❌ The Apex API returned unexpected map rotation data.")
 
         embed = discord.Embed(
             title="🗺️ Apex Legends Map Rotation",
-            description=(
-                "Current and upcoming Apex Legends maps."
-            ),
+            description="Current maps and how long they have left.",
             color=EMBED_COLOR
         )
-
         displayed = 0
-
-        # ==================================================
-        # MAP DATA
-        # ==================================================
-
         for mode_name, mode_data in data.items():
-
-            if not isinstance(
-                mode_data,
-                dict
-            ):
+            if not isinstance(mode_data, dict):
                 continue
-
-            current = mode_data.get(
-                "current",
-                {}
-            )
-
-            next_map = mode_data.get(
-                "next",
-                {}
-            )
-
-            if not isinstance(
-                current,
-                dict
-            ):
-                current = {}
-
-            if not isinstance(
-                next_map,
-                dict
-            ):
-                next_map = {}
-
-            current_map = current.get(
-                "map"
-            )
-
-            next_map_name = next_map.get(
-                "map"
-            )
-
-            if not current_map:
-
-                current_map = "Unknown"
-
-            if not next_map_name:
-
-                next_map_name = "Unknown"
-
-            if (
-                current_map == "Unknown"
-                and next_map_name == "Unknown"
-            ):
+            current = mode_data.get("current") if isinstance(mode_data.get("current"), dict) else {}
+            nxt = mode_data.get("next") if isinstance(mode_data.get("next"), dict) else {}
+            current_map = current.get("map") or current.get("name") or "Unknown"
+            next_map = nxt.get("map") or nxt.get("name") or "Unknown"
+            end_time = (current.get("end") or current.get("endTime") or current.get("end_timestamp") or
+                        current.get("endsAt") or current.get("remaining") or current.get("duration"))
+            remaining = format_remaining(end_time)
+            if end_time is not None and remaining is None:
+                remaining = str(end_time)
+            if current_map == "Unknown" and next_map == "Unknown":
                 continue
-
-            clean_name = (
-                mode_name
-                .replace("_", " ")
-                .title()
-            )
-
-            embed.add_field(
-                name=clean_name,
-                value=(
-                    f"**Now:** {current_map}\n"
-                    f"**Next:** {next_map_name}"
-                ),
-                inline=False
-            )
-
+            value = f"**Now:** {current_map}"
+            if remaining:
+                value += f"\n⏳ **Time left:** {remaining}"
+            value += f"\n**Next:** {next_map}"
+            embed.add_field(name=mode_name.replace("_", " ").title(), value=value, inline=False)
             displayed += 1
-
-        if displayed == 0:
-
-            embed.description = (
-                "⚠️ The API responded, but no map "
-                "rotation information was returned."
-            )
-
-        embed.set_footer(
-            text=(
-                "Live data provided by "
-                "Apex Legends Status"
-            )
-        )
-
-        await ctx.send(
-            embed=embed
-        )
+        if not displayed:
+            embed.description = "⚠️ The API responded, but no map rotation information was found."
+        embed.set_footer(text="Live data provided by Apex Legends Status")
+        await ctx.send(embed=embed)
 
 
     # ======================================================
@@ -814,131 +668,49 @@ class Apex(commands.Cog):
     # ======================================================
 
     @commands.command(
-        name="predator",
-        aliases=[
-            "predrp",
-            "predatorrp"
-        ]
+        name="predator", aliases=["predrp", "predatorrp"]
     )
     async def predator(self, ctx):
-
         async with ctx.typing():
-
-            data, error = await self.api_request(
-                "/predator"
-            )
-
+            data, error = await self.api_request("/predator")
         if error:
-
             return await ctx.send(error)
-
-        if not isinstance(
-            data,
-            dict
-        ):
-
-            return await ctx.send(
-                "❌ The Apex API returned unexpected data."
-            )
+        if not isinstance(data, dict):
+            return await ctx.send("❌ The Apex API returned unexpected Predator data.")
 
         embed = discord.Embed(
             title="👑 Apex Predator Thresholds",
-            description=(
-                "Current RP/AP requirements for "
-                "Apex Predator."
-            ),
+            description="Current ranked points needed for Predator.",
             color=EMBED_COLOR
         )
-
-        rp_data = data.get(
-            "RP",
-            {}
-        )
-
-        if not isinstance(
-            rp_data,
-            dict
-        ):
-
-            rp_data = {}
-
-        platforms = {
-
-            "PC": rp_data.get(
-                "PC"
-            ),
-
-            "PlayStation": rp_data.get(
-                "PS4"
-            ),
-
-            "Xbox": rp_data.get(
-                "X1"
-            ),
-
-            "Switch": rp_data.get(
-                "SWITCH"
-            )
-        }
-
+        rp_data = data.get("RP") if isinstance(data.get("RP"), dict) else data
+        platforms = {"PC": ["PC", "pc"], "PlayStation": ["PS4", "PS", "playstation"], "Xbox": ["X1", "Xbox", "xbox"], "Switch": ["SWITCH", "Switch", "switch"]}
         added = False
-
-        for name, platform_data in platforms.items():
-
-            if not isinstance(
-                platform_data,
-                dict
-            ):
+        for label, keys in platforms.items():
+            obj = None
+            for key in keys:
+                if isinstance(rp_data, dict) and isinstance(rp_data.get(key), dict):
+                    obj = rp_data[key]; break
+            if obj is None:
                 continue
-
-            value = platform_data.get(
-                "val"
-            )
-
-            total_masters = platform_data.get(
-                "totalMasters"
-            )
-
+            value = obj.get("val") or obj.get("value") or obj.get("rp") or obj.get("RP")
+            masters = obj.get("totalMasters") or obj.get("masters")
             if value is None:
                 continue
-
-            text = (
-                f"**Required RP:** "
-                f"{format_number(value)}"
-            )
-
-            if total_masters is not None:
-
-                text += (
-                    f"\n**Masters:** "
-                    f"{format_number(total_masters)}"
-                )
-
-            embed.add_field(
-                name=name,
-                value=text,
-                inline=True
-            )
-
+            text = f"**Required RP:** {format_number(value)}"
+            if masters is not None:
+                text += f"\n**Masters:** {format_number(masters)}"
+            embed.add_field(name=label, value=text, inline=True)
             added = True
-
         if not added:
-
-            embed.description = (
-                "⚠️ The API returned Predator data "
-                "in an unexpected format."
-            )
-
-        embed.set_footer(
-            text=(
-                "Live data provided by "
-                "Apex Legends Status"
-            )
-        )
-
-        await ctx.send(
-            embed=embed
-        )
+            fallback = _first_value(data, "val", "value", "rp", "RP")
+            if fallback is not None:
+                embed.add_field(name="Predator", value=f"**Required RP:** {format_number(fallback)}", inline=False)
+                added = True
+        if not added:
+            embed.description = "⚠️ Predator data was returned in a format this bot doesn't recognize yet."
+        embed.set_footer(text="Live data provided by Apex Legends Status")
+        await ctx.send(embed=embed)
 
 
     # ======================================================

@@ -75,6 +75,22 @@ def get_account(guild_id, user_id):
     return cursor.fetchone()
 
 
+def add_wallet(guild_id, user_id, amount):
+    ensure_account(guild_id, user_id)
+    cursor.execute("""
+    UPDATE economy
+    SET wallet = wallet + ?
+    WHERE guild_id=? AND user_id=?
+    """, (amount, guild_id, user_id))
+    db.commit()
+    return True
+
+
+def get_wallet(guild_id, user_id):
+    wallet, _, _, _ = get_account(guild_id, user_id)
+    return wallet
+
+
 def format_time(seconds):
 
     seconds = max(

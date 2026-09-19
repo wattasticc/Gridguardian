@@ -15,7 +15,7 @@ class Notifications(commands.Cog):
 
     @commands.command()
     @commands.has_permissions(manage_guild=True)
-    async def twitch(self, ctx, *, message):
+    async def twitch(self, ctx, *, message: str = None):
 
         role = discord.utils.get(
             ctx.guild.roles,
@@ -26,6 +26,9 @@ class Notifications(commands.Cog):
             return await ctx.send(
                 "❌ The **Twitch Notifications** role doesn't exist."
             )
+
+        if not message:
+            return await ctx.send("❌ Usage: `!twitch <message>`")
 
         embed = discord.Embed(
             title="🟣 Twitch Notification",
@@ -48,7 +51,7 @@ class Notifications(commands.Cog):
 
     @commands.command()
     @commands.has_permissions(manage_guild=True)
-    async def youtube(self, ctx, *, message):
+    async def youtube(self, ctx, *, message: str = None):
 
         role = discord.utils.get(
             ctx.guild.roles,
@@ -59,6 +62,9 @@ class Notifications(commands.Cog):
             return await ctx.send(
                 "❌ The **YouTube Notifications** role doesn't exist."
             )
+
+        if not message:
+            return await ctx.send("❌ Usage: `!youtube <message>`")
 
         embed = discord.Embed(
             title="▶️ YouTube Notification",
@@ -81,7 +87,7 @@ class Notifications(commands.Cog):
 
     @commands.command()
     @commands.has_permissions(manage_guild=True)
-    async def tiktok(self, ctx, *, message):
+    async def tiktok(self, ctx, *, message: str = None):
 
         role = discord.utils.get(
             ctx.guild.roles,
@@ -92,6 +98,9 @@ class Notifications(commands.Cog):
             return await ctx.send(
                 "❌ The **TikTok Notifications** role doesn't exist."
             )
+
+        if not message:
+            return await ctx.send("❌ Usage: `!tiktok <message>`")
 
         embed = discord.Embed(
             title="🎵 TikTok Notification",
@@ -114,7 +123,7 @@ class Notifications(commands.Cog):
 
     @commands.command()
     @commands.has_permissions(manage_guild=True)
-    async def instagram(self, ctx, *, message):
+    async def instagram(self, ctx, *, message: str = None):
 
         role = discord.utils.get(
             ctx.guild.roles,
@@ -125,6 +134,9 @@ class Notifications(commands.Cog):
             return await ctx.send(
                 "❌ The **Instagram Notifications** role doesn't exist."
             )
+
+        if not message:
+            return await ctx.send("❌ Usage: `!instagram <message>`")
 
         embed = discord.Embed(
             title="📸 Instagram Notification",
