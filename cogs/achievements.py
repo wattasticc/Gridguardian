@@ -16,54 +16,6 @@ class Achievements(commands.Cog):
         self.bot = bot
 
     # ==========================================================
-    # VIEW ACHIEVEMENTS
-    # ==========================================================
-
-    @commands.command()
-    async def achievements(
-        self,
-        ctx,
-        member: discord.Member = None
-    ):
-
-        if member is None:
-            member = ctx.author
-
-        unlocked = get_achievements(member.id)
-
-        embed = discord.Embed(
-            title=f"🏅 {member.display_name}'s Achievements",
-            color=EMBED_COLOR
-        )
-
-        embed.set_thumbnail(
-            url=member.display_avatar.url
-        )
-
-        if not unlocked:
-
-            embed.description = (
-                "No achievements unlocked yet.\n\n"
-                "Keep chatting, leveling up, completing quests, "
-                "and using Grid Guardian!"
-            )
-
-        else:
-
-            embed.description = "\n".join(
-                f"✅ {achievement}"
-                for achievement in unlocked
-            )
-
-        embed.set_footer(
-            text=f"{len(unlocked)} Achievement(s) Unlocked"
-        )
-
-        await ctx.send(
-            embed=embed
-        )
-
-    # ==========================================================
     # GIVE ACHIEVEMENT
     # ==========================================================
 

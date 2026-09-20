@@ -22,7 +22,7 @@ class SocialRoleView(discord.ui.View):
         label="Twitch",
         emoji="🟣",
         style=discord.ButtonStyle.primary,
-        custom_id="social_role_twitch"
+        custom_id="reaction_role_twitch"
     )
     async def twitch(
         self,
@@ -43,7 +43,7 @@ class SocialRoleView(discord.ui.View):
         label="TikTok",
         emoji="🎵",
         style=discord.ButtonStyle.secondary,
-        custom_id="social_role_tiktok"
+        custom_id="reaction_role_tiktok"
     )
     async def tiktok(
         self,
@@ -64,7 +64,7 @@ class SocialRoleView(discord.ui.View):
         label="YouTube",
         emoji="▶️",
         style=discord.ButtonStyle.danger,
-        custom_id="social_role_youtube"
+        custom_id="reaction_role_youtube"
     )
     async def youtube(
         self,
@@ -85,7 +85,7 @@ class SocialRoleView(discord.ui.View):
         label="Instagram",
         emoji="📸",
         style=discord.ButtonStyle.primary,
-        custom_id="social_role_instagram"
+        custom_id="reaction_role_instagram"
     )
     async def instagram(
         self,
