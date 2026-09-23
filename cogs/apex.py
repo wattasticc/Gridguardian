@@ -192,15 +192,20 @@ class Apex(commands.Cog):
 
                         try:
 
+                            # Tracker/Apex Legends Status supports the API key
+                            # in the Authorization header.  Do not send an
+                            # application/json Accept header here: some of the
+                            # current endpoints can answer with HTTP 406 when
+                            # that content-negotiation header is forced.
+                            request_headers = {
+                                "Authorization": APEX_API_KEY,
+                                "User-Agent": "GridGuardian/1.0",
+                            }
+
                             async with session.get(
                                 url,
                                 params=params,
-                                headers={
-                                    "Accept": "application/json",
-                                    "User-Agent": (
-                                        "GridGuardian/1.0"
-                                    )
-                                }
+                                headers=request_headers
                             ) as response:
 
                                 # ==================================
@@ -274,41 +279,57 @@ class Apex(commands.Cog):
                                     body = await response.text()
 
                                     print(
-                                        "❌ Apex API returned "
-                                        "HTTP 406."
+                                        "⚠️ Apex API returned HTTP 406; "
+                                        "retrying with the alternate auth format."
                                     )
+                                    print(f"Endpoint: {current_endpoint}")
+                                    print(f"Response: {body[:2000]}")
 
-                                    print(
-                                        f"URL: {url}"
-                                    )
+                                    # A few deployments have returned 406 when
+                                    # the request negotiates JSON explicitly.
+                                    # Retry once using only the documented
+                                    # Authorization header and no Accept header.
+                                    retry_headers = {
+                                        "Authorization": APEX_API_KEY,
+                                        "User-Agent": "Mozilla/5.0",
+                                    }
+                                    retry_params = dict(params)
+                                    retry_params.pop("auth", None)
 
-                                    print(
-                                        f"Endpoint: "
-                                        f"{current_endpoint}"
-                                    )
+                                    try:
+                                        async with session.get(
+                                            url,
+                                            params=retry_params,
+                                            headers=retry_headers
+                                        ) as retry_response:
+                                            if retry_response.status == 200:
+                                                retry_data = await retry_response.json(
+                                                    content_type=None
+                                                )
+                                                if isinstance(retry_data, (dict, list)):
+                                                    return retry_data, None
 
-                                    print(
-                                        f"Response: "
-                                        f"{body[:2000]}"
-                                    )
-
-                                    # Try the fallback endpoint
-                                    # if one was provided.
-                                    if (
-                                        current_endpoint
-                                        != endpoints[-1]
-                                    ):
-
+                                            retry_body = await retry_response.text()
+                                            print(
+                                                f"⚠️ Apex API retry returned "
+                                                f"HTTP {retry_response.status}: "
+                                                f"{retry_body[:1000]}"
+                                            )
+                                    except aiohttp.ClientError as retry_error:
                                         print(
-                                            "⚠️ Trying Apex API "
-                                            "fallback endpoint..."
+                                            f"⚠️ Apex API retry failed: {retry_error}"
                                         )
 
+                                    # Try the fallback endpoint if one was provided.
+                                    if current_endpoint != endpoints[-1]:
+                                        print(
+                                            "⚠️ Trying Apex API fallback endpoint..."
+                                        )
                                         continue
 
                                     return None, (
-                                        "❌ The Apex API returned "
-                                        "HTTP 406 (Not Acceptable)."
+                                        "❌ The Apex API rejected this request "
+                                        "(HTTP 406)."
                                     )
 
                                 # ==================================
