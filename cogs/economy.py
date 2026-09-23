@@ -29,6 +29,21 @@ CREATE TABLE IF NOT EXISTS economy (
 )
 """)
 
+# Migrate older economy schemas used by previous versions of Grid Guardian.
+cursor.execute("PRAGMA table_info(economy)")
+economy_columns = {row[1] for row in cursor.fetchall()}
+
+if "wallet" not in economy_columns:
+    cursor.execute("ALTER TABLE economy ADD COLUMN wallet INTEGER DEFAULT 0")
+    if "balance" in economy_columns:
+        cursor.execute("UPDATE economy SET wallet = COALESCE(balance, 0)")
+
+if "bank" not in economy_columns:
+    cursor.execute("ALTER TABLE economy ADD COLUMN bank INTEGER DEFAULT 0")
+if "last_work" not in economy_columns:
+    cursor.execute("ALTER TABLE economy ADD COLUMN last_work TEXT")
+if "last_beg" not in economy_columns:
+    cursor.execute("ALTER TABLE economy ADD COLUMN last_beg TEXT")
 
 db.commit()
 

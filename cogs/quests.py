@@ -92,18 +92,33 @@ if "quest_id" not in quest_columns:
 # ----------------------------------------------------------
 # ECONOMY TABLE SAFETY CHECK
 # ----------------------------------------------------------
-
+# The economy cog is the single owner of the economy schema.
+# Quests only reads/writes the shared wallet column for rewards.
 cursor.execute("""
 CREATE TABLE IF NOT EXISTS economy (
     user_id INTEGER NOT NULL,
     guild_id INTEGER NOT NULL,
-    balance INTEGER DEFAULT 0,
+    wallet INTEGER DEFAULT 0,
     bank INTEGER DEFAULT 0,
-    last_work REAL DEFAULT 0,
+    last_work TEXT,
+    last_beg TEXT,
     PRIMARY KEY (user_id, guild_id)
 )
 """)
 
+cursor.execute("PRAGMA table_info(economy)")
+economy_columns = {row[1] for row in cursor.fetchall()}
+
+if "wallet" not in economy_columns:
+    cursor.execute("ALTER TABLE economy ADD COLUMN wallet INTEGER DEFAULT 0")
+    if "balance" in economy_columns:
+        cursor.execute("UPDATE economy SET wallet = COALESCE(balance, 0)")
+if "bank" not in economy_columns:
+    cursor.execute("ALTER TABLE economy ADD COLUMN bank INTEGER DEFAULT 0")
+if "last_work" not in economy_columns:
+    cursor.execute("ALTER TABLE economy ADD COLUMN last_work TEXT")
+if "last_beg" not in economy_columns:
+    cursor.execute("ALTER TABLE economy ADD COLUMN last_beg TEXT")
 
 db.commit()
 
@@ -160,7 +175,7 @@ def ensure_economy_user(user_id, guild_id):
     INSERT OR IGNORE INTO economy (
         user_id,
         guild_id,
-        balance,
+        wallet,
         bank,
         last_work
     )
@@ -182,7 +197,7 @@ def add_coins(user_id, guild_id, amount):
 
     cursor.execute("""
     UPDATE economy
-    SET balance = balance + ?
+    SET wallet = wallet + ?
     WHERE user_id=?
     AND guild_id=?
     """, (

@@ -102,33 +102,28 @@ class Shop(commands.Cog):
 
         name, description, price, role_id = item
 
-        # Get balance
+        # Use the shared guild economy wallet.
         cursor.execute("""
-        SELECT balance
+        SELECT wallet
         FROM economy
-        WHERE user_id=?
-        """, (ctx.author.id,))
+        WHERE user_id=? AND guild_id=?
+        """, (ctx.author.id, ctx.guild.id))
 
         balance_data = cursor.fetchone()
 
         if balance_data is None:
             balance = 0
-
             cursor.execute("""
-            INSERT INTO economy(user_id, balance, last_daily)
-            VALUES (?, 0, 0)
-            """, (ctx.author.id,))
-
+            INSERT OR IGNORE INTO economy (
+                user_id, guild_id, wallet, bank
+            ) VALUES (?, ?, 0, 0)
+            """, (ctx.author.id, ctx.guild.id))
             db.commit()
-
         else:
-            balance = balance_data[0]
+            balance = int(balance_data[0] or 0)
 
-        # Check balance
         if balance < price:
-
             missing = price - balance
-
             return await ctx.send(
                 f"❌ You don't have enough coins.\n\n"
                 f"💰 Your balance: **{balance:,}**\n"
@@ -161,14 +156,15 @@ class Shop(commands.Cog):
                     "❌ I don't have permission to give that role."
                 )
 
-        # Remove coins
+        # Remove coins from the shared wallet.
         cursor.execute("""
         UPDATE economy
-        SET balance = balance - ?
-        WHERE user_id=?
+        SET wallet = wallet - ?
+        WHERE user_id=? AND guild_id=?
         """, (
             price,
-            ctx.author.id
+            ctx.author.id,
+            ctx.guild.id
         ))
 
         db.commit()
