@@ -13,39 +13,101 @@ EMBED_COLOR = discord.Color.from_rgb(80, 220, 255)
 # DATABASE
 # =========================================================
 
-db = sqlite3.connect("gridguardian.db")
+DB_PATH = "gridguardian.db"
+
+
+def _open_db():
+    return sqlite3.connect(DB_PATH, timeout=15)
+
+
+def _ensure_economy_schema():
+    """Create/migrate the economy table into one canonical schema.
+
+    Older Grid Guardian versions used a `balance` column.  Simply adding a
+    `wallet` column is not enough when that old column is NOT NULL, because
+    new INSERTs can then fail.  We rebuild the table when necessary and
+    preserve the old balances.
+    """
+    with _open_db() as conn:
+        cur = conn.cursor()
+        cur.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='economy'")
+        exists = cur.fetchone() is not None
+
+        if not exists:
+            cur.execute("""
+                CREATE TABLE economy (
+                    user_id INTEGER NOT NULL,
+                    guild_id INTEGER NOT NULL,
+                    wallet INTEGER DEFAULT 0,
+                    bank INTEGER DEFAULT 0,
+                    last_work TEXT,
+                    last_beg TEXT,
+                    PRIMARY KEY (user_id, guild_id)
+                )
+            """)
+            return
+
+        cur.execute("PRAGMA table_info(economy)")
+        columns = {row[1] for row in cur.fetchall()}
+        required = {"user_id", "guild_id", "wallet", "bank", "last_work", "last_beg"}
+
+        # A clean canonical table can be left alone.
+        if required.issubset(columns) and "balance" not in columns:
+            return
+
+        # Rebuild incompatible/legacy schemas safely.
+        cur.execute("""
+            CREATE TABLE economy_new (
+                user_id INTEGER NOT NULL,
+                guild_id INTEGER NOT NULL,
+                wallet INTEGER DEFAULT 0,
+                bank INTEGER DEFAULT 0,
+                last_work TEXT,
+                last_beg TEXT,
+                PRIMARY KEY (user_id, guild_id)
+            )
+        """)
+
+        def col(name, fallback):
+            return name if name in columns else fallback
+
+        wallet_expr = (
+            "CASE WHEN wallet IS NULL OR wallet = 0 "
+            "THEN COALESCE(balance, 0) ELSE wallet END"
+            if "wallet" in columns and "balance" in columns
+            else ("wallet" if "wallet" in columns else ("balance" if "balance" in columns else "0"))
+        )
+        bank_expr = col("bank", "0")
+        work_expr = col("last_work", "NULL")
+        beg_expr = col("last_beg", "NULL")
+
+        if "user_id" in columns and "guild_id" in columns:
+            cur.execute(f"""
+                INSERT INTO economy_new (user_id, guild_id, wallet, bank, last_work, last_beg)
+                SELECT user_id, guild_id,
+                       COALESCE({wallet_expr}, 0),
+                       COALESCE({bank_expr}, 0),
+                       {work_expr},
+                       {beg_expr}
+                FROM economy
+            """)
+
+        # Keep the old table as a backup instead of deleting it.
+        cur.execute("DROP TABLE IF EXISTS economy_legacy_backup")
+        cur.execute("ALTER TABLE economy RENAME TO economy_legacy_backup")
+        cur.execute("ALTER TABLE economy_new RENAME TO economy")
+        conn.commit()
+
+
+_ensure_economy_schema()
+
+
+def _get_conn():
+    return _open_db()
+
+# Compatibility connection for the existing command handlers.
+db = _open_db()
 cursor = db.cursor()
-
-
-cursor.execute("""
-CREATE TABLE IF NOT EXISTS economy (
-    user_id INTEGER NOT NULL,
-    guild_id INTEGER NOT NULL,
-    wallet INTEGER DEFAULT 0,
-    bank INTEGER DEFAULT 0,
-    last_work TEXT,
-    last_beg TEXT,
-    PRIMARY KEY (user_id, guild_id)
-)
-""")
-
-# Migrate older economy schemas used by previous versions of Grid Guardian.
-cursor.execute("PRAGMA table_info(economy)")
-economy_columns = {row[1] for row in cursor.fetchall()}
-
-if "wallet" not in economy_columns:
-    cursor.execute("ALTER TABLE economy ADD COLUMN wallet INTEGER DEFAULT 0")
-    if "balance" in economy_columns:
-        cursor.execute("UPDATE economy SET wallet = COALESCE(balance, 0)")
-
-if "bank" not in economy_columns:
-    cursor.execute("ALTER TABLE economy ADD COLUMN bank INTEGER DEFAULT 0")
-if "last_work" not in economy_columns:
-    cursor.execute("ALTER TABLE economy ADD COLUMN last_work TEXT")
-if "last_beg" not in economy_columns:
-    cursor.execute("ALTER TABLE economy ADD COLUMN last_beg TEXT")
-
-db.commit()
 
 
 # =========================================================
@@ -53,51 +115,32 @@ db.commit()
 # =========================================================
 
 def ensure_account(guild_id, user_id):
-
-    cursor.execute("""
-    INSERT OR IGNORE INTO economy (
-        user_id,
-        guild_id,
-        wallet,
-        bank
-    )
-    VALUES (?, ?, 0, 0)
-    """, (
-        user_id,
-        guild_id
-    ))
-
-    db.commit()
+    with _get_conn() as conn:
+        conn.execute("""
+            INSERT OR IGNORE INTO economy (user_id, guild_id, wallet, bank)
+            VALUES (?, ?, 0, 0)
+        """, (user_id, guild_id))
 
 
 def get_account(guild_id, user_id):
-
-    ensure_account(
-        guild_id,
-        user_id
-    )
-
-    cursor.execute("""
-    SELECT wallet, bank, last_work, last_beg
-    FROM economy
-    WHERE guild_id=?
-    AND user_id=?
-    """, (
-        guild_id,
-        user_id
-    ))
-
-    return cursor.fetchone()
+    ensure_account(guild_id, user_id)
+    with _get_conn() as conn:
+        row = conn.execute("""
+            SELECT wallet, bank, last_work, last_beg
+            FROM economy
+            WHERE guild_id=? AND user_id=?
+        """, (guild_id, user_id)).fetchone()
+    return row
 
 
 def add_wallet(guild_id, user_id, amount):
     ensure_account(guild_id, user_id)
-    cursor.execute("""
-    UPDATE economy
-    SET wallet = wallet + ?
-    WHERE guild_id=? AND user_id=?
-    """, (amount, guild_id, user_id))
-    db.commit()
+    with _get_conn() as conn:
+        conn.execute("""
+            UPDATE economy
+            SET wallet = wallet + ?
+            WHERE guild_id=? AND user_id=?
+        """, (amount, guild_id, user_id))
     return True
 
 
