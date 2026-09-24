@@ -153,6 +153,11 @@ LEGACY_ACHIEVEMENT_IDS = {
     "Level 25": "level_25",
     "Level 50": "level_50",
     "Level 100": "level_100",
+    "⭐ Level 5": "level_5",
+    "⭐ Level 10": "level_10",
+    "⭐ Level 25": "level_25",
+    "⭐ Level 50": "level_50",
+    "⭐ Level 100": "level_100",
 }
 
 
