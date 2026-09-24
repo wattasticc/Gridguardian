@@ -101,6 +101,58 @@ ACHIEVEMENTS = {
         "emoji": "👑",
         "reward": 750,
     },
+    "mastery_25": {
+        "name": "Wattson Mastery Level 25",
+        "description": "Reach Wattson Mastery Level 25.",
+        "emoji": "⚡",
+        "reward": 250,
+    },
+    "level_5": {
+        "name": "Level 5",
+        "description": "Reach Grid Guardian Level 5.",
+        "emoji": "📈",
+        "reward": 25,
+    },
+    "level_10": {
+        "name": "Level 10",
+        "description": "Reach Grid Guardian Level 10.",
+        "emoji": "📈",
+        "reward": 50,
+    },
+    "level_25": {
+        "name": "Level 25",
+        "description": "Reach Grid Guardian Level 25.",
+        "emoji": "📈",
+        "reward": 100,
+    },
+    "level_50": {
+        "name": "Level 50",
+        "description": "Reach Grid Guardian Level 50.",
+        "emoji": "📈",
+        "reward": 250,
+    },
+    "level_100": {
+        "name": "Level 100",
+        "description": "Reach Grid Guardian Level 100.",
+        "emoji": "📈",
+        "reward": 500,
+    },
+}
+
+
+# Older versions stored achievement names directly instead of the canonical IDs.
+# Normalize those values when reading so existing unlocks are not lost.
+LEGACY_ACHIEVEMENT_IDS = {
+    "⚡ Wattson Mastery Level 5": "grid_recruit",
+    "⚡ Wattson Mastery Level 10": "fence_specialist",
+    "⚡ Wattson Mastery Level 25": "mastery_25",
+    "⚡ Wattson Mastery Level 50": "power_grid_master",
+    "👑 Wattson Mastery Level 100": "master_of_the_grid",
+    "Level 5": "level_5",
+    "Level 10": "level_10",
+    "Level 25": "level_25",
+    "Level 50": "level_50",
+    "Level 100": "level_100",
 }
 
 
@@ -178,7 +230,10 @@ class AchievementSystem(commands.Cog):
         conn.close()
 
         return {
-            row["achievement"]
+            LEGACY_ACHIEVEMENT_IDS.get(
+                row["achievement"],
+                row["achievement"],
+            )
             for row in rows
         }
 
@@ -188,6 +243,11 @@ class AchievementSystem(commands.Cog):
         guild_id: int,
         achievement_id: str
     ):
+        achievement_id = LEGACY_ACHIEVEMENT_IDS.get(
+            achievement_id,
+            achievement_id,
+        )
+
         if achievement_id not in ACHIEVEMENTS:
             return False
 

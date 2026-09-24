@@ -193,114 +193,55 @@ def _ensure_daily_quests(
 
     columns = _get_columns(cursor)
 
+    # Match the schema owned by cogs.daily_quests.
+    # Older helper versions looked for name/description/reward_xp,
+    # while the live table uses quest_name/quest_description/xp_reward.
+    required = {
+        "guild_id",
+        "user_id",
+        "quest_date",
+        "quest_type",
+        "quest_name",
+        "quest_description",
+        "target",
+        "progress",
+        "xp_reward",
+        "claimed",
+    }
+
+    if not required.issubset(columns):
+        return False
+
     for quest in selected:
-        # Support the expected schema used by the daily quest system.
-        if {
-            "guild_id",
-            "user_id",
-            "quest_date",
-            "quest_type",
-            "name",
-            "description",
-            "target",
-            "progress",
-            "claimed",
-        }.issubset(columns):
-            cursor.execute(
-                """
-                INSERT INTO daily_quests (
-                    guild_id,
-                    user_id,
-                    quest_date,
-                    quest_type,
-                    name,
-                    description,
-                    target,
-                    progress,
-                    claimed
-                )
-                VALUES (?, ?, ?, ?, ?, ?, ?, 0, 0)
-                """,
-                (
-                    guild_id,
-                    user_id,
-                    today,
-                    quest["type"],
-                    quest["name"],
-                    quest["description"],
-                    quest["target"],
-                ),
+        cursor.execute(
+            """
+            INSERT INTO daily_quests (
+                guild_id,
+                user_id,
+                quest_date,
+                quest_type,
+                quest_name,
+                quest_description,
+                target,
+                progress,
+                xp_reward,
+                claimed,
+                created_at
             )
-
-        else:
-            # Fall back to the simpler schema if the table contains
-            # reward_xp or other fields from an older version.
-            available_columns = {
-                "guild_id",
-                "user_id",
-                "quest_date",
-                "quest_type",
-                "name",
-                "description",
-                "target",
-                "progress",
-                "reward_xp",
-                "claimed",
-            }
-
-            insert_columns = [
-                column
-                for column in [
-                    "guild_id",
-                    "user_id",
-                    "quest_date",
-                    "quest_type",
-                    "name",
-                    "description",
-                    "target",
-                    "progress",
-                    "reward_xp",
-                    "claimed",
-                ]
-                if column in columns and column in available_columns
-            ]
-
-            values = []
-
-            for column in insert_columns:
-                if column == "guild_id":
-                    values.append(guild_id)
-                elif column == "user_id":
-                    values.append(user_id)
-                elif column == "quest_date":
-                    values.append(today)
-                elif column == "quest_type":
-                    values.append(quest["type"])
-                elif column == "name":
-                    values.append(quest["name"])
-                elif column == "description":
-                    values.append(quest["description"])
-                elif column == "target":
-                    values.append(quest["target"])
-                elif column == "progress":
-                    values.append(0)
-                elif column == "reward_xp":
-                    values.append(quest["reward_xp"])
-                elif column == "claimed":
-                    values.append(0)
-
-            if insert_columns:
-                placeholders = ", ".join(["?"] * len(insert_columns))
-
-                cursor.execute(
-                    f"""
-                    INSERT INTO daily_quests (
-                        {", ".join(insert_columns)}
-                    )
-                    VALUES ({placeholders})
-                    """,
-                    values,
-                )
+            VALUES (?, ?, ?, ?, ?, ?, ?, 0, ?, 0, ?)
+            """,
+            (
+                guild_id,
+                user_id,
+                today,
+                quest["type"],
+                quest["name"],
+                quest["description"],
+                quest["target"],
+                quest["reward_xp"],
+                datetime.now(timezone.utc).isoformat(),
+            ),
+        )
 
     return True
 

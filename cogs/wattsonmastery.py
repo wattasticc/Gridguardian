@@ -32,11 +32,11 @@ TITLES = [
 ]
 
 MILESTONE_ACHIEVEMENTS = {
-    5: "⚡ Wattson Mastery Level 5",
-    10: "⚡ Wattson Mastery Level 10",
-    25: "⚡ Wattson Mastery Level 25",
-    50: "⚡ Wattson Mastery Level 50",
-    100: "👑 Wattson Mastery Level 100",
+    5: "grid_recruit",
+    10: "fence_specialist",
+    25: "mastery_25",
+    50: "power_grid_master",
+    100: "master_of_the_grid",
 }
 
 TIPS = [
