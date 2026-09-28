@@ -7,14 +7,16 @@ from discord.ext import commands
 
 DB_PATH = "gridguardian.db"
 
+# XP settings
 XP_COOLDOWN = 60
 XP_MIN = 5
 XP_MAX = 15
 
-# Current progression:
-# Level 1 -> 2: 100 XP
-# Level 2 -> 3: 125 XP
-# Level 3 -> 4: 150 XP
+# Progressive leveling:
+# Level 1 -> 2 = 100 XP
+# Level 2 -> 3 = 125 XP
+# Level 3 -> 4 = 150 XP
+# Every level requires 25 more XP than the previous level.
 BASE_XP_REQUIRED = 100
 XP_INCREASE_PER_LEVEL = 25
 
@@ -28,12 +30,13 @@ LEVEL_ACHIEVEMENTS = {
 
 
 def xp_required_for_level(level: int) -> int:
+    """XP needed to move from this level to the next level."""
     level = max(1, int(level))
     return BASE_XP_REQUIRED + ((level - 1) * XP_INCREASE_PER_LEVEL)
 
 
 def total_xp_required_for_level(level: int) -> int:
-    """Minimum cumulative XP needed to be at this level."""
+    """Cumulative XP required to reach the beginning of a level."""
     level = max(1, int(level))
     completed_levels = level - 1
     return (
@@ -43,35 +46,38 @@ def total_xp_required_for_level(level: int) -> int:
 
 
 def level_from_total_xp(total_xp: int) -> int:
+    """Calculate a level from permanent cumulative XP."""
     total_xp = max(0, int(total_xp))
     level = 1
-    remaining = total_xp
+    spent = 0
 
-    while remaining >= xp_required_for_level(level):
-        remaining -= xp_required_for_level(level)
+    while True:
+        needed = xp_required_for_level(level)
+        if spent + needed > total_xp:
+            return level
+        spent += needed
         level += 1
-
-    return level
 
 
 def progress_from_total_xp(total_xp: int) -> tuple[int, int]:
+    """Return current-level XP and XP needed for the next level."""
     total_xp = max(0, int(total_xp))
     level = level_from_total_xp(total_xp)
     current_xp = total_xp - total_xp_required_for_level(level)
     return current_xp, xp_required_for_level(level)
 
 
-def legacy_total_xp_from_level(level: int, xp: int) -> int:
-    """Convert the old fixed 100-XP-per-level system to cumulative XP."""
+def total_xp_from_level_and_progress(level: int, xp: int) -> int:
+    """Build a valid cumulative XP value from an existing level/progress pair."""
     level = max(1, int(level))
     xp = max(0, int(xp))
-    completed_levels = level - 1
-    cumulative = 100 * completed_levels * (completed_levels + 1) // 2
-    return cumulative + xp
+    required = xp_required_for_level(level)
+    xp = min(xp, max(0, required - 1))
+    return total_xp_required_for_level(level) + xp
 
 
 class Leveling(commands.Cog):
-    """XP, levels, ranks, achievements, and level roles."""
+    """XP, progressive levels, ranks, achievements, and level roles."""
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -79,7 +85,8 @@ class Leveling(commands.Cog):
         self.init_database()
 
     def init_database(self):
-        with sqlite3.connect(DB_PATH) as conn:
+        """Create/migrate the leveling tables without ever lowering an existing level."""
+        with sqlite3.connect(DB_PATH, timeout=10) as conn:
             cursor = conn.cursor()
 
             cursor.execute(
@@ -116,7 +123,6 @@ class Leveling(commands.Cog):
                 """
             )
 
-            # Normalize every existing row without ever lowering a recorded level.
             cursor.execute(
                 """
                 SELECT user_id, xp, level, total_xp, highest_level, highest_total_xp
@@ -124,33 +130,35 @@ class Leveling(commands.Cog):
                 """
             )
 
-            for user_id, old_xp, stored_level, stored_total_xp, highest_level, highest_total_xp in cursor.fetchall():
-                old_xp = max(0, int(old_xp or 0))
+            rows = cursor.fetchall()
+            for user_id, xp, stored_level, stored_total, highest_level, highest_total in rows:
                 stored_level = max(1, int(stored_level or 1))
-                stored_total_xp = max(0, int(stored_total_xp or 0))
+                xp = max(0, int(xp or 0))
+                stored_total = max(0, int(stored_total or 0))
                 highest_level = max(1, int(highest_level or 1))
-                highest_total_xp = max(0, int(highest_total_xp or 0))
+                highest_total = max(0, int(highest_total or 0))
 
-                # Old rows with no authoritative total_xp are migrated once.
-                if stored_total_xp == 0 and (stored_level > 1 or old_xp > 0):
-                    stored_total_xp = legacy_total_xp_from_level(stored_level, old_xp)
+                # If total_xp was never initialized, convert the existing level/xp pair.
+                if stored_total <= 0 and (stored_level > 1 or xp > 0):
+                    stored_total = total_xp_from_level_and_progress(stored_level, xp)
 
-                # Never allow the database to forget a higher level/XP value.
-                protected_level = max(
-                    stored_level,
-                    highest_level,
-                    level_from_total_xp(stored_total_xp),
-                    level_from_total_xp(highest_total_xp),
-                )
-                protected_total_xp = max(
-                    stored_total_xp,
-                    highest_total_xp,
-                    total_xp_required_for_level(protected_level),
-                )
+                # The stored level is authoritative during migration. This prevents
+                # an old/inconsistent total_xp value from dropping someone a level.
+                calculated_level = level_from_total_xp(stored_total)
+                final_level = max(stored_level, highest_level, calculated_level)
 
-                current_xp, _ = progress_from_total_xp(protected_total_xp)
-                highest_level = max(protected_level, highest_level)
-                highest_total_xp = max(protected_total_xp, highest_total_xp)
+                # If an old row says Level 15 but total_xp only calculates to Level 14,
+                # rebuild total_xp from the Level 15 + current XP instead of downgrading.
+                if final_level > calculated_level:
+                    progress_xp = xp
+                    required = xp_required_for_level(final_level)
+                    progress_xp = min(progress_xp, required - 1)
+                    stored_total = total_xp_required_for_level(final_level) + progress_xp
+
+                final_level = max(final_level, level_from_total_xp(stored_total))
+                current_xp, _ = progress_from_total_xp(stored_total)
+                highest_level = max(highest_level, final_level)
+                highest_total = max(highest_total, stored_total)
 
                 cursor.execute(
                     """
@@ -161,10 +169,10 @@ class Leveling(commands.Cog):
                     """,
                     (
                         current_xp,
-                        protected_level,
-                        protected_total_xp,
+                        final_level,
+                        stored_total,
                         highest_level,
-                        highest_total_xp,
+                        highest_total,
                         user_id,
                     ),
                 )
@@ -178,48 +186,14 @@ class Leveling(commands.Cog):
                         highest_total_xp = MAX(level_history.highest_total_xp, excluded.highest_total_xp),
                         updated_at = CURRENT_TIMESTAMP
                     """,
-                    (user_id, highest_level, highest_total_xp),
+                    (user_id, highest_level, highest_total),
                 )
 
             conn.commit()
 
-    def _normalize_row(self, row):
-        (
-            old_xp,
-            stored_level,
-            stored_total_xp,
-            highest_level,
-            highest_total_xp,
-        ) = row
-
-        old_xp = max(0, int(old_xp or 0))
-        stored_level = max(1, int(stored_level or 1))
-        stored_total_xp = max(0, int(stored_total_xp or 0))
-        highest_level = max(1, int(highest_level or 1))
-        highest_total_xp = max(0, int(highest_total_xp or 0))
-
-        if stored_total_xp == 0 and (stored_level > 1 or old_xp > 0):
-            stored_total_xp = legacy_total_xp_from_level(stored_level, old_xp)
-
-        protected_level = max(
-            stored_level,
-            highest_level,
-            level_from_total_xp(stored_total_xp),
-            level_from_total_xp(highest_total_xp),
-        )
-        protected_total_xp = max(
-            stored_total_xp,
-            highest_total_xp,
-            total_xp_required_for_level(protected_level),
-        )
-
-        return protected_level, protected_total_xp
-
     def get_user_data(self, user_id: int):
-        # This method may repair inconsistent rows, so serialize the write.
         with sqlite3.connect(DB_PATH, timeout=10) as conn:
             cursor = conn.cursor()
-            cursor.execute("BEGIN IMMEDIATE")
             cursor.execute(
                 """
                 SELECT xp, level, total_xp, highest_level, highest_total_xp
@@ -231,30 +205,44 @@ class Leveling(commands.Cog):
             row = cursor.fetchone()
 
             if row is None:
-                conn.commit()
                 return None
 
-            level, total_xp = self._normalize_row(row)
-            current_xp, required_xp = progress_from_total_xp(total_xp)
+            xp, stored_level, stored_total, highest_level, highest_total = row
+            stored_level = max(1, int(stored_level or 1))
+            stored_total = max(0, int(stored_total or 0))
+            highest_level = max(1, int(highest_level or 1))
+            highest_total = max(0, int(highest_total or 0))
+
+            # Never calculate a lower level from an inconsistent old total.
+            level = max(stored_level, highest_level, level_from_total_xp(stored_total))
+
+            if level > level_from_total_xp(stored_total):
+                stored_total = max(
+                    stored_total,
+                    total_xp_from_level_and_progress(level, int(xp or 0)),
+                    total_xp_required_for_level(level),
+                )
+
+            current_xp, required_xp = progress_from_total_xp(stored_total)
+            highest_total = max(highest_total, stored_total)
+            highest_level = max(highest_level, level)
 
             cursor.execute(
                 """
                 UPDATE levels
                 SET xp = ?, level = ?, total_xp = ?,
-                    highest_level = MAX(highest_level, ?),
-                    highest_total_xp = MAX(highest_total_xp, ?)
+                    highest_level = ?, highest_total_xp = ?
                 WHERE user_id = ?
                 """,
                 (
                     current_xp,
                     level,
-                    total_xp,
-                    level,
-                    total_xp,
+                    stored_total,
+                    highest_level,
+                    highest_total,
                     user_id,
                 ),
             )
-
             cursor.execute(
                 """
                 INSERT INTO level_history (user_id, highest_level, highest_total_xp)
@@ -264,14 +252,14 @@ class Leveling(commands.Cog):
                     highest_total_xp = MAX(level_history.highest_total_xp, excluded.highest_total_xp),
                     updated_at = CURRENT_TIMESTAMP
                 """,
-                (user_id, level, total_xp),
+                (user_id, highest_level, highest_total),
             )
             conn.commit()
 
             return {
                 "xp": current_xp,
                 "level": level,
-                "total_xp": total_xp,
+                "total_xp": stored_total,
                 "required": required_xp,
             }
 
@@ -308,6 +296,7 @@ class Leveling(commands.Cog):
                     old_total_xp = 0
                     total_xp = xp_gain
                     new_level = level_from_total_xp(total_xp)
+                    current_xp, _ = progress_from_total_xp(total_xp)
                     highest_level = new_level
                     highest_total_xp = total_xp
 
@@ -319,7 +308,7 @@ class Leveling(commands.Cog):
                         """,
                         (
                             user_id,
-                            total_xp,
+                            current_xp,
                             new_level,
                             total_xp,
                             highest_level,
@@ -327,15 +316,31 @@ class Leveling(commands.Cog):
                         ),
                     )
                 else:
-                    old_level, old_total_xp = self._normalize_row(row)
+                    old_xp, stored_level, stored_total, highest_level, highest_total = row
+                    stored_level = max(1, int(stored_level or 1))
+                    stored_total = max(0, int(stored_total or 0))
+                    highest_level = max(1, int(highest_level or 1))
+                    highest_total = max(0, int(highest_total or 0))
+
+                    calculated_level = level_from_total_xp(stored_total)
+                    old_level = max(stored_level, highest_level, calculated_level)
+
+                    # Repair an inconsistent row before adding new XP.
+                    if old_level > calculated_level:
+                        stored_total = max(
+                            stored_total,
+                            total_xp_from_level_and_progress(old_level, int(old_xp or 0)),
+                            total_xp_required_for_level(old_level),
+                        )
+
+                    old_level = max(old_level, level_from_total_xp(stored_total))
+                    old_total_xp = stored_total
                     total_xp = old_total_xp + xp_gain
                     new_level = max(old_level, level_from_total_xp(total_xp))
-                    # If the protected level is ahead of the mathematical total,
-                    # keep enough cumulative XP to make that level permanent.
-                    total_xp = max(total_xp, total_xp_required_for_level(new_level))
                     current_xp, _ = progress_from_total_xp(total_xp)
-                    highest_level = max(int(row[3] or 1), new_level)
-                    highest_total_xp = max(int(row[4] or 0), total_xp)
+
+                    highest_level = max(highest_level, new_level)
+                    highest_total_xp = max(highest_total, total_xp)
 
                     cursor.execute(
                         """
@@ -365,8 +370,8 @@ class Leveling(commands.Cog):
                     """,
                     (user_id, highest_level, highest_total_xp),
                 )
-
                 conn.commit()
+
         except sqlite3.Error as error:
             print(f"[LEVELING] Database error for {user_id}: {error}")
             return
@@ -377,7 +382,6 @@ class Leveling(commands.Cog):
             await self.handle_level_up(message, old_level, new_level, total_xp)
 
     async def handle_level_up(self, message, old_level, new_level, total_xp):
-        # Unlock every milestone crossed, not just the final level.
         milestones = [
             (level, achievement)
             for level, achievement in LEVEL_ACHIEVEMENTS.items()
@@ -412,7 +416,6 @@ class Leveling(commands.Cog):
         await self.sync_level_roles(message.author, message.guild, new_level)
 
         current_xp, required_xp = progress_from_total_xp(total_xp)
-
         embed = discord.Embed(
             title="🎉 Level Up!",
             description=f"{message.author.mention} reached **Level {new_level}**!",
@@ -533,7 +536,7 @@ class Leveling(commands.Cog):
     @commands.guild_only()
     @commands.has_permissions(administrator=True)
     async def set_level(self, ctx: commands.Context, member: discord.Member, level: int):
-        """Administrator repair tool; never lowers a user's existing level."""
+        """Administrator repair tool. It can raise a level but never lowers one."""
         if level < 1:
             return await ctx.send("❌ Level must be 1 or higher.")
 
@@ -542,19 +545,27 @@ class Leveling(commands.Cog):
             cursor.execute("BEGIN IMMEDIATE")
             cursor.execute(
                 """
-                SELECT level, total_xp, highest_level, highest_total_xp
+                SELECT xp, level, total_xp, highest_level, highest_total_xp
                 FROM levels WHERE user_id = ?
                 """,
                 (member.id,),
             )
             row = cursor.fetchone()
 
-            current_level = int(row[0]) if row else 1
-            current_total = int(row[1]) if row else 0
-            highest_level = int(row[2]) if row else 1
-            highest_total = int(row[3]) if row else 0
+            if row:
+                old_xp, current_level, current_total, highest_level, highest_total = row
+                current_level = max(1, int(current_level or 1))
+                current_total = max(0, int(current_total or 0))
+                highest_level = max(1, int(highest_level or 1))
+                highest_total = max(0, int(highest_total or 0))
+            else:
+                old_xp = 0
+                current_level = 1
+                current_total = 0
+                highest_level = 1
+                highest_total = 0
 
-            target_level = max(level, current_level, highest_level)
+            target_level = max(int(level), current_level, highest_level)
             target_total = max(
                 current_total,
                 highest_total,
@@ -598,7 +609,7 @@ class Leveling(commands.Cog):
 
         await self.sync_level_roles(member, ctx.guild, target_level)
         await ctx.send(
-            f"✅ {member.mention} is protected at **Level {target_level}** with **{target_total:,} total XP**."
+            f"✅ {member.mention} is now protected at **Level {target_level}** with **{target_total:,} total XP**."
         )
 
     @commands.command(name="setlevelrole")
