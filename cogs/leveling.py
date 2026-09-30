@@ -99,6 +99,17 @@ class Leveling(commands.Cog):
             if "total_xp" not in columns:
                 cursor.execute("ALTER TABLE levels ADD COLUMN total_xp INTEGER DEFAULT 0")
 
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS level_up_announcements (
+                    user_id INTEGER NOT NULL,
+                    level INTEGER NOT NULL,
+                    announced_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (user_id, level)
+                )
+                """
+            )
+
             cursor.execute("SELECT user_id, xp, level, total_xp FROM levels")
             rows = cursor.fetchall()
 
@@ -223,7 +234,36 @@ class Leveling(commands.Cog):
         self.xp_cooldowns[user_id] = now
 
         if new_level > old_level:
-            await self.handle_level_up(message, old_level, new_level, total_xp)
+            # Claim each newly reached level atomically. This prevents duplicate
+            # announcements if multiple events/processes observe the same level.
+            for reached_level in range(old_level + 1, new_level + 1):
+                if await self.claim_level_announcement(message.author.id, reached_level):
+                    await self.handle_level_up(
+                        message, old_level, reached_level, total_xp
+                    )
+
+    def claim_level_announcement(self, user_id: int, level: int) -> bool:
+        """Atomically claim a level-up announcement.
+
+        Returns True only for the first process that claims this user's level.
+        """
+        try:
+            with sqlite3.connect(DB_PATH, timeout=10) as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    INSERT OR IGNORE INTO level_up_announcements
+                    (user_id, level)
+                    VALUES (?, ?)
+                    """,
+                    (user_id, level),
+                )
+                conn.commit()
+                return cursor.rowcount == 1
+        except sqlite3.Error as error:
+            print(f"[LEVELING] Announcement tracking error: {error}")
+            # If tracking fails, do not send an announcement that could duplicate.
+            return False
 
     async def handle_level_up(self, message, old_level, new_level, total_xp):
         milestones = [
