@@ -81,7 +81,6 @@ async def load_cogs():
     await bot.load_extension("cogs.reactionroles")
     await bot.load_extension("cogs.apex")
     await bot.load_extension("cogs.apexnews")
-    await bot.load_extension("cogs.apexmapnotify")
     await bot.load_extension("cogs.apexpatch")
     await bot.load_extension("cogs.wattsonmastery")
     await bot.load_extension("cogs.economy")

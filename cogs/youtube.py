@@ -256,7 +256,7 @@ class YouTube(commands.Cog):
 
             role = discord.utils.get(
                 discord_guild.roles,
-                name="YouTube Notifications"
+                name="▶️ YouTube Notifications"
             )
 
             role_mention = (
