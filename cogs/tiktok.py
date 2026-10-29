@@ -1,23 +1,25 @@
+
 import asyncio
 import sqlite3
+import urllib.request
+import urllib.error
+import xml.etree.ElementTree as ET
+
 from datetime import datetime, timezone
 
 import discord
 from discord.ext import commands, tasks
-import yt_dlp
 
 
 # ==========================================================
 # CONFIGURATION
 # ==========================================================
 
-EMBED_COLOR = discord.Color.from_rgb(
-    80,
-    220,
-    255
-)
+EMBED_COLOR = discord.Color.from_rgb(80, 220, 255)
 
 CHECK_INTERVAL_MINUTES = 10
+
+RSSHUB_URL = "https://rsshub.app"
 
 
 # ==========================================================
@@ -48,14 +50,6 @@ CREATE TABLE IF NOT EXISTS tiktok_settings (
 )
 """)
 
-
-# ----------------------------------------------------------
-# DATABASE MIGRATION
-#
-# Adds role_id if you already created the table before this
-# version of the TikTok cog.
-# ----------------------------------------------------------
-
 cursor.execute("""
 PRAGMA table_info(tiktok_settings)
 """)
@@ -65,14 +59,11 @@ existing_columns = {
     for row in cursor.fetchall()
 }
 
-
 if "role_id" not in existing_columns:
-
     cursor.execute("""
     ALTER TABLE tiktok_settings
     ADD COLUMN role_id INTEGER
     """)
-
 
 db.commit()
 
@@ -84,26 +75,18 @@ db.commit()
 class TikTok(commands.Cog):
 
     def __init__(self, bot):
-
         self.bot = bot
-
         self.check_lock = asyncio.Lock()
-
-        # The first successful check for each guild after startup is
-        # a baseline sync only. It never announces the current TikTok.
         self.initialized_guilds = set()
 
         self.tiktok_check_loop.start()
-
 
     # ======================================================
     # COG UNLOAD
     # ======================================================
 
     def cog_unload(self):
-
         self.tiktok_check_loop.cancel()
-
 
     # ======================================================
     # DATABASE HELPERS
@@ -121,18 +104,12 @@ class TikTok(commands.Cog):
             updated_at
         FROM tiktok_settings
         WHERE guild_id = ?
-        """, (
-            guild_id,
-        ))
-
+        """, (guild_id,))
 
         row = cursor.fetchone()
 
-
         if row is None:
-
             return None
-
 
         return {
             "username": row[0],
@@ -143,13 +120,11 @@ class TikTok(commands.Cog):
             "updated_at": row[5]
         }
 
-
     def create_settings(self, guild_id):
 
         timestamp = datetime.now(
             timezone.utc
         ).isoformat()
-
 
         cursor.execute("""
         INSERT OR IGNORE INTO tiktok_settings (
@@ -161,39 +136,18 @@ class TikTok(commands.Cog):
             last_video_url,
             updated_at
         )
-        VALUES (
-            ?,
-            NULL,
-            NULL,
-            NULL,
-            NULL,
-            NULL,
-            ?
-        )
-        """, (
-            guild_id,
-            timestamp
-        ))
-
+        VALUES (?, NULL, NULL, NULL, NULL, NULL, ?)
+        """, (guild_id, timestamp))
 
         db.commit()
 
-
-    def update_username(
-        self,
-        guild_id,
-        username
-    ):
+    def update_username(self, guild_id, username):
 
         timestamp = datetime.now(
             timezone.utc
         ).isoformat()
 
-
-        self.create_settings(
-            guild_id
-        )
-
+        self.create_settings(guild_id)
 
         cursor.execute("""
         UPDATE tiktok_settings
@@ -203,96 +157,49 @@ class TikTok(commands.Cog):
             last_video_url = NULL,
             updated_at = ?
         WHERE guild_id = ?
-        """, (
-            username,
-            timestamp,
-            guild_id
-        ))
-
+        """, (username, timestamp, guild_id))
 
         db.commit()
 
-
-    def update_channel(
-        self,
-        guild_id,
-        channel_id
-    ):
+    def update_channel(self, guild_id, channel_id):
 
         timestamp = datetime.now(
             timezone.utc
         ).isoformat()
 
-
-        self.create_settings(
-            guild_id
-        )
-
+        self.create_settings(guild_id)
 
         cursor.execute("""
         UPDATE tiktok_settings
-        SET
-            channel_id = ?,
-            updated_at = ?
+        SET channel_id = ?, updated_at = ?
         WHERE guild_id = ?
-        """, (
-            channel_id,
-            timestamp,
-            guild_id
-        ))
-
+        """, (channel_id, timestamp, guild_id))
 
         db.commit()
 
-
-    def update_role(
-        self,
-        guild_id,
-        role_id
-    ):
+    def update_role(self, guild_id, role_id):
 
         timestamp = datetime.now(
             timezone.utc
         ).isoformat()
 
-
-        self.create_settings(
-            guild_id
-        )
-
+        self.create_settings(guild_id)
 
         cursor.execute("""
         UPDATE tiktok_settings
-        SET
-            role_id = ?,
-            updated_at = ?
+        SET role_id = ?, updated_at = ?
         WHERE guild_id = ?
-        """, (
-            role_id,
-            timestamp,
-            guild_id
-        ))
-
+        """, (role_id, timestamp, guild_id))
 
         db.commit()
 
-
-    def update_last_video(
-        self,
-        guild_id,
-        video_id,
-        video_url
-    ):
+    def update_last_video(self, guild_id, video_id, video_url):
 
         timestamp = datetime.now(
             timezone.utc
         ).isoformat()
 
-
-        self.create_settings(
-            guild_id
-        )
-
+        self.create_settings(guild_id)
 
         cursor.execute("""
         UPDATE tiktok_settings
@@ -301,16 +208,9 @@ class TikTok(commands.Cog):
             last_video_url = ?,
             updated_at = ?
         WHERE guild_id = ?
-        """, (
-            video_id,
-            video_url,
-            timestamp,
-            guild_id
-        ))
-
+        """, (video_id, video_url, timestamp, guild_id))
 
         db.commit()
-
 
     # ======================================================
     # USERNAME CLEANUP
@@ -321,387 +221,255 @@ class TikTok(commands.Cog):
 
         username = username.strip()
 
-
-        if username.startswith("@"):
-
-            username = username[1:]
-
-
         username = username.replace(
             "https://www.tiktok.com/@",
             ""
         )
-
 
         username = username.replace(
             "https://tiktok.com/@",
             ""
         )
 
+        username = username.replace("@", "", 1)
 
-        username = username.split(
-            "/"
-        )[0]
-
-
-        username = username.split(
-            "?"
-        )[0]
-
+        username = username.split("/")[0]
+        username = username.split("?")[0]
 
         return username.strip()
-
 
     # ======================================================
     # GET LATEST TIKTOK
     # ======================================================
 
-    async def get_latest_tiktok(
-        self,
-        username
-    ):
+    async def get_latest_tiktok(self, username):
 
-        profile_url = (
-            f"https://www.tiktok.com/@{username}"
+        username = self.clean_username(username)
+
+        feed_url = (
+            f"{RSSHUB_URL}/tiktok/user/@{username}"
         )
 
+        def fetch_feed():
 
-        ydl_options = {
+            request = urllib.request.Request(
+                feed_url,
+                headers={
+                    "User-Agent": "Mozilla/5.0 GridGuardian/1.0",
+                    "Accept": (
+                        "application/rss+xml, "
+                        "application/xml, text/xml"
+                    )
+                }
+            )
 
-            "quiet": True,
+            with urllib.request.urlopen(
+                request,
+                timeout=20
+            ) as response:
 
-            "no_warnings": True,
-
-            "extract_flat": False,
-
-            "playlistend": 1,
-
-            "skip_download": True,
-
-            "noplaylist": False
-
-        }
-
-
-        def extract_video():
-
-            with yt_dlp.YoutubeDL(
-                ydl_options
-            ) as ydl:
-
-                return ydl.extract_info(
-                    profile_url,
-                    download=False
-                )
-
+                return response.read()
 
         try:
 
-            data = await asyncio.to_thread(
-                extract_video
+            xml_data = await asyncio.to_thread(
+                fetch_feed
             )
 
+            root = ET.fromstring(xml_data)
+
+            item = root.find("./channel/item")
+
+            if item is None:
+
+                print(
+                    f"⚠️ TikTok feed returned no videos "
+                    f"for @{username}."
+                )
+
+                return None
+
+            title = (
+                item.findtext("title")
+                or "New TikTok posted!"
+            )
+
+            video_url = item.findtext("link")
+
+            if not video_url:
+
+                print(
+                    f"⚠️ TikTok feed did not provide "
+                    f"a video URL for @{username}."
+                )
+
+                return None
+
+            video_id = None
+
+            if "/video/" in video_url:
+
+                video_id = (
+                    video_url
+                    .split("/video/")[-1]
+                    .split("?")[0]
+                )
+
+            if not video_id:
+                video_id = video_url
+
+            description = title.strip()
+
+            if len(description) > 1000:
+                description = description[:997] + "..."
+
+            thumbnail = None
+
+            for element in item.iter():
+
+                if element.tag.endswith("thumbnail"):
+
+                    thumbnail = (
+                        element.attrib.get("url")
+                        or element.attrib.get("href")
+                    )
+
+                    if thumbnail:
+                        break
+
+            return {
+                "id": str(video_id),
+                "url": video_url,
+                "description": description,
+                "thumbnail": thumbnail,
+                "uploader": username
+            }
+
+        except urllib.error.HTTPError as error:
+
+            print(
+                f"⚠️ TikTok RSS HTTP error for "
+                f"@{username}: {error.code} {error.reason}"
+            )
+
+            return None
+
+        except urllib.error.URLError as error:
+
+            print(
+                f"⚠️ TikTok RSS connection error for "
+                f"@{username}: {error.reason}"
+            )
+
+            return None
+
+        except ET.ParseError as error:
+
+            print(
+                f"⚠️ TikTok RSS returned invalid XML "
+                f"for @{username}: {error}"
+            )
+
+            return None
 
         except Exception as error:
 
             print(
-                "⚠️ TikTok check failed for "
-                f"@{username}: {error}"
+                f"⚠️ TikTok RSS check failed for "
+                f"@{username}: {type(error).__name__}: {error}"
             )
 
             return None
-
-
-        if data is None:
-
-            return None
-
-
-        entries = data.get(
-            "entries"
-        )
-
-
-        if entries:
-
-            entries = list(
-                entries
-            )
-
-
-            if not entries:
-
-                return None
-
-
-            video = entries[0]
-
-
-        else:
-
-            video = data
-
-
-        video_id = video.get(
-            "id"
-        )
-
-
-        video_url = video.get(
-            "webpage_url"
-        )
-
-
-        if not video_url:
-
-            video_url = video.get(
-                "original_url"
-            )
-
-
-        if not video_url and video_id:
-
-            video_url = (
-                f"https://www.tiktok.com/@"
-                f"{username}/video/{video_id}"
-            )
-
-
-        if not video_id:
-
-            return None
-
-
-        description = video.get(
-            "description"
-        )
-
-
-        if not description:
-
-            description = video.get(
-                "title"
-            )
-
-
-        if not description:
-
-            description = (
-                "New TikTok posted!"
-            )
-
-
-        thumbnail = video.get(
-            "thumbnail"
-        )
-
-
-        uploader = video.get(
-            "uploader"
-        )
-
-
-        if not uploader:
-
-            uploader = username
-
-
-        return {
-
-            "id": str(
-                video_id
-            ),
-
-            "url": video_url,
-
-            "description": description,
-
-            "thumbnail": thumbnail,
-
-            "uploader": uploader
-
-        }
-
 
     # ======================================================
     # SEND NOTIFICATION
     # ======================================================
 
-    async def send_notification(
-        self,
-        guild,
-        settings,
-        video
-    ):
+    async def send_notification(self, guild, settings, video):
 
-        channel_id = settings.get(
-            "channel_id"
-        )
-
+        channel_id = settings.get("channel_id")
 
         if not channel_id:
-
             return False
 
-
-        channel = guild.get_channel(
-            channel_id
-        )
-
+        channel = guild.get_channel(channel_id)
 
         if channel is None:
 
             try:
-
                 channel = await self.bot.fetch_channel(
                     channel_id
                 )
 
-            except Exception:
+            except Exception as error:
+
+                print(
+                    f"⚠️ Could not find TikTok channel: {error}"
+                )
 
                 return False
 
-
-        username = settings.get(
-            "username"
-        )
-
-
-        role_id = settings.get(
-            "role_id"
-        )
-
+        username = settings.get("username")
+        role_id = settings.get("role_id")
 
         role_mention = None
 
-
         if role_id:
 
-            role = guild.get_role(
-                role_id
-            )
-
+            role = guild.get_role(role_id)
 
             if role:
-
-                role_mention = (
-                    role.mention
-                )
-
+                role_mention = role.mention
 
         profile_url = (
             f"https://www.tiktok.com/@{username}"
         )
-
 
         description = video.get(
             "description",
             "New TikTok posted!"
         )
 
-
         if len(description) > 1000:
-
-            description = (
-                description[:997]
-                + "..."
-            )
-
-
-        # ==================================================
-        # CREATE EMBED
-        # ==================================================
+            description = description[:997] + "..."
 
         embed = discord.Embed(
-
             title="🎵 New TikTok!",
-
             description=description,
-
             color=EMBED_COLOR,
-
-            timestamp=datetime.now(
-                timezone.utc
-            )
-
+            timestamp=datetime.now(timezone.utc)
         )
-
 
         embed.set_author(
-
-            name=(
-                f"@{username}"
-            ),
-
+            name=f"@{username}",
             url=profile_url
-
         )
-
 
         embed.add_field(
-
             name="📱 Watch",
-
-            value=(
-                f"[Click here to watch the TikTok]"
-                f"({video['url']})"
-            ),
-
+            value=f"[Click here to watch the TikTok]({video['url']})",
             inline=False
-
         )
 
-
-        if video.get(
-            "thumbnail"
-        ):
+        if video.get("thumbnail"):
 
             embed.set_image(
-
-                url=video[
-                    "thumbnail"
-                ]
-
+                url=video["thumbnail"]
             )
-
 
         embed.set_footer(
-
-            text=(
-                "Grid Guardian • TikTok Notifications"
-            )
-
+            text="Grid Guardian • TikTok Notifications"
         )
-
-
-        # ==================================================
-        # BUTTON
-        # ==================================================
 
         view = discord.ui.View()
 
-
         button = discord.ui.Button(
-
             label="Watch TikTok",
-
-            url=video[
-                "url"
-            ],
-
+            url=video["url"],
             emoji="🎵"
-
         )
 
-
-        view.add_item(
-            button
-        )
-
-
-        # ==================================================
-        # NOTIFICATION MESSAGE
-        # ==================================================
+        view.add_item(button)
 
         if role_mention:
 
@@ -717,26 +485,18 @@ class TikTok(commands.Cog):
                 f"@{username}!**"
             )
 
-
         try:
 
             await channel.send(
-
                 content=content,
-
                 embed=embed,
-
                 view=view,
-
                 allowed_mentions=discord.AllowedMentions(
                     roles=True
                 )
-
             )
 
-
             return True
-
 
         except discord.Forbidden:
 
@@ -745,76 +505,38 @@ class TikTok(commands.Cog):
                 "to send TikTok notifications."
             )
 
-
             return False
-
 
         except Exception as error:
 
             print(
-                "⚠️ Could not send TikTok notification: "
-                f"{error}"
+                f"⚠️ Could not send TikTok notification: {error}"
             )
 
-
             return False
-
 
     # ======================================================
     # CHECK ONE GUILD
     # ======================================================
 
-    async def check_guild(
-        self,
-        guild
-    ):
+    async def check_guild(self, guild):
 
-        settings = self.get_settings(
-            guild.id
-        )
-
+        settings = self.get_settings(guild.id)
 
         if settings is None:
-
             return
 
+        username = settings.get("username")
+        channel_id = settings.get("channel_id")
 
-        username = settings.get(
-            "username"
-        )
-
-
-        channel_id = settings.get(
-            "channel_id"
-        )
-
-
-        if not username:
-
+        if not username or not channel_id:
             return
 
-
-        if not channel_id:
-
-            return
-
-
-        video = await self.get_latest_tiktok(
-            username
-        )
-
+        video = await self.get_latest_tiktok(username)
 
         if video is None:
-
             return
 
-
-        # --------------------------------------------------
-        # STARTUP SYNC PROTECTION
-        # --------------------------------------------------
-        # Never announce the current TikTok merely because the bot
-        # restarted. The first successful check after startup stores
-        # the current video as the baseline.
         if guild.id not in self.initialized_guilds:
 
             self.update_last_video(
@@ -823,95 +545,51 @@ class TikTok(commands.Cog):
                 video["url"]
             )
 
-            self.initialized_guilds.add(
-                guild.id
-            )
+            self.initialized_guilds.add(guild.id)
 
             print(
-                "🎵 TikTok startup sync complete for "
+                f"🎵 TikTok startup sync complete for "
                 f"{guild.name}."
             )
 
             return
 
-
-        last_video_id = settings.get(
-            "last_video_id"
-        )
-
-
-        # --------------------------------------------------
-        # FIRST CHECK
-        # --------------------------------------------------
+        last_video_id = settings.get("last_video_id")
 
         if last_video_id is None:
 
             self.update_last_video(
-
                 guild.id,
-
                 video["id"],
-
                 video["url"]
-
             )
-
 
             print(
-                "🎵 TikTok monitoring started for "
-                f"@{username}."
+                f"🎵 TikTok monitoring started for @{username}."
             )
 
-
             return
 
-
-        # --------------------------------------------------
-        # SAME VIDEO
-        # --------------------------------------------------
-
-        if str(
-            last_video_id
-        ) == str(
-            video["id"]
-        ):
-
+        if str(last_video_id) == str(video["id"]):
             return
-
-
-        # --------------------------------------------------
-        # NEW VIDEO
-        # --------------------------------------------------
 
         sent = await self.send_notification(
-
             guild,
-
             settings,
-
             video
-
         )
-
 
         if sent:
 
             self.update_last_video(
-
                 guild.id,
-
                 video["id"],
-
                 video["url"]
-
             )
-
 
             print(
-                "🎵 New TikTok detected from "
-                f"@{username}!"
+                f"🎵 New TikTok detected from @{username}!"
             )
-
 
     # ======================================================
     # CHECK ALL GUILDS
@@ -925,36 +603,28 @@ class TikTok(commands.Cog):
 
                 try:
 
-                    await self.check_guild(
-                        guild
-                    )
-
+                    await self.check_guild(guild)
 
                 except Exception as error:
 
                     print(
-                        "⚠️ TikTok monitoring error in "
+                        f"⚠️ TikTok monitoring error in "
                         f"{guild.name}: {error}"
                     )
-
 
     # ======================================================
     # AUTOMATIC CHECK LOOP
     # ======================================================
 
-    @tasks.loop(
-        minutes=CHECK_INTERVAL_MINUTES
-    )
+    @tasks.loop(minutes=CHECK_INTERVAL_MINUTES)
     async def tiktok_check_loop(self):
 
         await self.check_all_guilds()
-
 
     @tiktok_check_loop.before_loop
     async def before_tiktok_check_loop(self):
 
         await self.bot.wait_until_ready()
-
 
     # ======================================================
     # SET TIKTOK ACCOUNT
@@ -962,19 +632,10 @@ class TikTok(commands.Cog):
 
     @commands.command(
         name="settiktok",
-        aliases=[
-            "tiktoksetup",
-            "tiktokuser"
-        ]
+        aliases=["tiktoksetup", "tiktokuser"]
     )
-    @commands.has_permissions(
-        administrator=True
-    )
-    async def settiktok(
-        self,
-        ctx,
-        username=None
-    ):
+    @commands.has_permissions(administrator=True)
+    async def settiktok(self, ctx, username=None):
 
         if not username:
 
@@ -983,11 +644,7 @@ class TikTok(commands.Cog):
                 "**Example:** `!settiktok wattasticc`"
             )
 
-
-        username = self.clean_username(
-            username
-        )
-
+        username = self.clean_username(username)
 
         if not username:
 
@@ -995,22 +652,16 @@ class TikTok(commands.Cog):
                 "❌ Please provide a valid TikTok username."
             )
 
-
         self.update_username(
             ctx.guild.id,
             username
         )
 
-
         checking_message = await ctx.send(
             "🔄 Checking the TikTok account..."
         )
 
-
-        video = await self.get_latest_tiktok(
-            username
-        )
-
+        video = await self.get_latest_tiktok(username)
 
         if video is None:
 
@@ -1018,29 +669,18 @@ class TikTok(commands.Cog):
                 content=(
                     "⚠️ The username was saved, but Grid "
                     "Guardian could not currently read the "
-                    "TikTok profile.\n\n"
-                    "Make sure the username is correct and "
-                    "the account is public."
+                    "TikTok profile. The RSS feed may be "
+                    "unavailable or TikTok may be blocking access."
                 )
             )
 
-
         self.update_last_video(
-
             ctx.guild.id,
-
             video["id"],
-
             video["url"]
-
         )
 
-        # The setup command has already established the current
-        # TikTok as the baseline.
-        self.initialized_guilds.add(
-            ctx.guild.id
-        )
-
+        self.initialized_guilds.add(ctx.guild.id)
 
         await checking_message.edit(
             content=(
@@ -1051,25 +691,16 @@ class TikTok(commands.Cog):
             )
         )
 
-
     # ======================================================
     # SET NOTIFICATION CHANNEL
     # ======================================================
 
     @commands.command(
         name="tiktokchannel",
-        aliases=[
-            "settiktokchannel"
-        ]
+        aliases=["settiktokchannel"]
     )
-    @commands.has_permissions(
-        administrator=True
-    )
-    async def tiktokchannel(
-        self,
-        ctx,
-        channel: discord.TextChannel = None
-    ):
+    @commands.has_permissions(administrator=True)
+    async def tiktokchannel(self, ctx, channel: discord.TextChannel = None):
 
         if channel is None:
 
@@ -1079,18 +710,15 @@ class TikTok(commands.Cog):
                 "`!tiktokchannel #tiktok-notifications`"
             )
 
-
         self.update_channel(
             ctx.guild.id,
             channel.id
         )
 
-
         await ctx.send(
             "✅ TikTok notifications will now be sent to "
             f"{channel.mention}!"
         )
-
 
     # ======================================================
     # SET PING ROLE
@@ -1098,21 +726,12 @@ class TikTok(commands.Cog):
 
     @commands.command(
         name="tiktokrole",
-        aliases=[
-            "settiktokrole",
-            "tiktokping"
-        ]
+        aliases=["settiktokrole", "tiktokping"]
     )
-    @commands.has_permissions(
-        administrator=True
-    )
-    async def tiktokrole(
-        self,
-        ctx,
-        role: discord.Role = None
-    ):
+    @commands.has_permissions(administrator=True)
+    async def tiktokrole(self, ctx, *, role_input=None):
 
-        if role is None:
+        if not role_input:
 
             return await ctx.send(
                 "❌ Please mention a role.\n\n"
@@ -1121,6 +740,31 @@ class TikTok(commands.Cog):
                 "`!tiktokrole none`"
             )
 
+        if role_input.lower().strip() == "none":
+
+            self.update_role(ctx.guild.id, None)
+
+            return await ctx.send(
+                "✅ TikTok role pinging has been disabled."
+            )
+
+        role = discord.utils.get(
+            ctx.guild.roles,
+            mention=role_input.strip()
+        )
+
+        if role is None:
+
+            role = discord.utils.get(
+                ctx.guild.roles,
+                name=role_input.strip().lstrip("@")
+            )
+
+        if role is None:
+
+            return await ctx.send(
+                "❌ I couldn't find that role. Please mention it."
+            )
 
         if role.is_default():
 
@@ -1129,18 +773,15 @@ class TikTok(commands.Cog):
                 "as the TikTok notification role."
             )
 
-
         self.update_role(
             ctx.guild.id,
             role.id
         )
 
-
         await ctx.send(
             "✅ New TikTok notifications will now ping "
             f"{role.mention}!"
         )
-
 
     # ======================================================
     # REMOVE PING ROLE
@@ -1148,29 +789,19 @@ class TikTok(commands.Cog):
 
     @commands.command(
         name="removetiktokrole",
-        aliases=[
-            "cleartiktokrole",
-            "untiktokrole"
-        ]
+        aliases=["cleartiktokrole", "untiktokrole"]
     )
-    @commands.has_permissions(
-        administrator=True
-    )
-    async def removetiktokrole(
-        self,
-        ctx
-    ):
+    @commands.has_permissions(administrator=True)
+    async def removetiktokrole(self, ctx):
 
         self.update_role(
             ctx.guild.id,
             None
         )
 
-
         await ctx.send(
             "✅ TikTok role pinging has been disabled."
         )
-
 
     # ======================================================
     # TIKTOK STATUS
@@ -1178,19 +809,11 @@ class TikTok(commands.Cog):
 
     @commands.command(
         name="tiktokstatus",
-        aliases=[
-            "tiktokinfo"
-        ]
+        aliases=["tiktokinfo"]
     )
-    async def tiktokstatus(
-        self,
-        ctx
-    ):
+    async def tiktokstatus(self, ctx):
 
-        settings = self.get_settings(
-            ctx.guild.id
-        )
-
+        settings = self.get_settings(ctx.guild.id)
 
         if settings is None:
 
@@ -1199,21 +822,9 @@ class TikTok(commands.Cog):
                 "configured yet."
             )
 
-
-        username = settings.get(
-            "username"
-        )
-
-
-        channel_id = settings.get(
-            "channel_id"
-        )
-
-
-        role_id = settings.get(
-            "role_id"
-        )
-
+        username = settings.get("username")
+        channel_id = settings.get("channel_id")
+        role_id = settings.get("role_id")
 
         if not username:
 
@@ -1221,110 +832,60 @@ class TikTok(commands.Cog):
                 "❌ No TikTok username has been configured."
             )
 
-
         channel_text = "Not configured"
-
         role_text = "No role ping"
-
 
         if channel_id:
 
-            channel = ctx.guild.get_channel(
-                channel_id
-            )
-
+            channel = ctx.guild.get_channel(channel_id)
 
             if channel:
-
-                channel_text = (
-                    channel.mention
-                )
-
+                channel_text = channel.mention
 
         if role_id:
 
-            role = ctx.guild.get_role(
-                role_id
-            )
-
+            role = ctx.guild.get_role(role_id)
 
             if role:
-
-                role_text = (
-                    role.mention
-                )
-
+                role_text = role.mention
 
         embed = discord.Embed(
-
             title="🎵 TikTok Notifications",
-
             color=EMBED_COLOR
-
         )
 
-
         embed.add_field(
-
             name="👤 TikTok Account",
-
             value=(
                 f"[@{username}]"
                 f"(https://www.tiktok.com/@{username})"
             ),
-
             inline=False
-
         )
 
-
         embed.add_field(
-
             name="📢 Notification Channel",
-
             value=channel_text,
-
             inline=False
-
         )
 
-
         embed.add_field(
-
             name="🔔 Ping Role",
-
             value=role_text,
-
             inline=False
-
         )
-
 
         embed.add_field(
-
             name="🔄 Check Interval",
-
-            value=(
-                f"Every "
-                f"{CHECK_INTERVAL_MINUTES} minutes"
-            ),
-
+            value=f"Every {CHECK_INTERVAL_MINUTES} minutes",
             inline=False
-
         )
-
 
         embed.set_footer(
-            text=(
-                "Grid Guardian • TikTok Notifications"
-            )
+            text="Grid Guardian • TikTok Notifications"
         )
 
-
-        await ctx.send(
-            embed=embed
-        )
-
+        await ctx.send(embed=embed)
 
     # ======================================================
     # MANUAL CHECK
@@ -1332,22 +893,12 @@ class TikTok(commands.Cog):
 
     @commands.command(
         name="checktiktok",
-        aliases=[
-            "refreshtiktok"
-        ]
+        aliases=["refreshtiktok"]
     )
-    @commands.has_permissions(
-        administrator=True
-    )
-    async def checktiktok(
-        self,
-        ctx
-    ):
+    @commands.has_permissions(administrator=True)
+    async def checktiktok(self, ctx):
 
-        settings = self.get_settings(
-            ctx.guild.id
-        )
-
+        settings = self.get_settings(ctx.guild.id)
 
         if settings is None:
 
@@ -1356,16 +907,8 @@ class TikTok(commands.Cog):
                 "configured yet."
             )
 
-
-        username = settings.get(
-            "username"
-        )
-
-
-        channel_id = settings.get(
-            "channel_id"
-        )
-
+        username = settings.get("username")
+        channel_id = settings.get("channel_id")
 
         if not username:
 
@@ -1374,7 +917,6 @@ class TikTok(commands.Cog):
                 "Use `!settiktok <username>` first."
             )
 
-
         if not channel_id:
 
             return await ctx.send(
@@ -1382,75 +924,46 @@ class TikTok(commands.Cog):
                 "Use `!tiktokchannel #channel` first."
             )
 
-
         checking_message = await ctx.send(
             "🔄 Checking for a new TikTok..."
         )
 
-
-        video = await self.get_latest_tiktok(
-            username
-        )
-
+        video = await self.get_latest_tiktok(username)
 
         if video is None:
 
             return await checking_message.edit(
                 content=(
-                    "⚠️ I couldn't check the TikTok account "
-                    "right now."
+                    "⚠️ I couldn't retrieve the TikTok feed. "
+                    "Check the bot console for details."
                 )
             )
 
+        last_video_id = settings.get("last_video_id")
 
-        last_video_id = settings.get(
-            "last_video_id"
-        )
-
-
-        if str(
-            last_video_id
-        ) == str(
-            video["id"]
-        ):
+        if str(last_video_id) == str(video["id"]):
 
             return await checking_message.edit(
-                content=(
-                    "✅ No new TikTok was found."
-                )
+                content="✅ No new TikTok was found."
             )
 
-
         sent = await self.send_notification(
-
             ctx.guild,
-
             settings,
-
             video
-
         )
-
 
         if sent:
 
             self.update_last_video(
-
                 ctx.guild.id,
-
                 video["id"],
-
                 video["url"]
-
             )
-
 
             await checking_message.edit(
-                content=(
-                    "🎵 New TikTok found and posted!"
-                )
+                content="🎵 New TikTok found and posted!"
             )
-
 
         else:
 
@@ -1461,94 +974,54 @@ class TikTok(commands.Cog):
                 )
             )
 
-
     # ======================================================
     # ERROR HANDLERS
     # ======================================================
 
     @settiktok.error
-    async def settiktok_error(
-        self,
-        ctx,
-        error
-    ):
+    async def settiktok_error(self, ctx, error):
 
-        if isinstance(
-            error,
-            commands.MissingPermissions
-        ):
+        if isinstance(error, commands.MissingPermissions):
 
             await ctx.send(
                 "❌ You need the **Administrator** permission "
                 "to configure TikTok notifications."
             )
-
 
     @tiktokchannel.error
-    async def tiktokchannel_error(
-        self,
-        ctx,
-        error
-    ):
+    async def tiktokchannel_error(self, ctx, error):
 
-        if isinstance(
-            error,
-            commands.MissingPermissions
-        ):
+        if isinstance(error, commands.MissingPermissions):
 
             await ctx.send(
                 "❌ You need the **Administrator** permission "
                 "to configure TikTok notifications."
             )
 
-
     @tiktokrole.error
-    async def tiktokrole_error(
-        self,
-        ctx,
-        error
-    ):
+    async def tiktokrole_error(self, ctx, error):
 
-        if isinstance(
-            error,
-            commands.MissingPermissions
-        ):
+        if isinstance(error, commands.MissingPermissions):
 
             await ctx.send(
                 "❌ You need the **Administrator** permission "
                 "to configure the TikTok ping role."
             )
-
 
     @removetiktokrole.error
-    async def removetiktokrole_error(
-        self,
-        ctx,
-        error
-    ):
+    async def removetiktokrole_error(self, ctx, error):
 
-        if isinstance(
-            error,
-            commands.MissingPermissions
-        ):
+        if isinstance(error, commands.MissingPermissions):
 
             await ctx.send(
                 "❌ You need the **Administrator** permission "
                 "to configure the TikTok ping role."
             )
 
-
     @checktiktok.error
-    async def checktiktok_error(
-        self,
-        ctx,
-        error
-    ):
+    async def checktiktok_error(self, ctx, error):
 
-        if isinstance(
-            error,
-            commands.MissingPermissions
-        ):
+        if isinstance(error, commands.MissingPermissions):
 
             await ctx.send(
                 "❌ You need the **Administrator** permission "
