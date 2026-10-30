@@ -1,3 +1,4 @@
+
 import asyncio
 import os
 import sqlite3
@@ -95,10 +96,10 @@ class ApexMapNotify(commands.Cog):
             )
             return None
 
+        # Updated request headers
         headers = {
             "Authorization": self.api_key,
             "User-Agent": "GridGuardian/1.0",
-            "Accept": "application/json",
         }
 
         params = {"version": "2"}
@@ -114,7 +115,6 @@ class ApexMapNotify(commands.Cog):
 
                     if response.status != 200:
                         body_preview = (await response.text())[:300]
-
                         print(
                             "[ApexMapNotify] API returned "
                             f"HTTP {response.status}; "
@@ -124,10 +124,8 @@ class ApexMapNotify(commands.Cog):
 
                     try:
                         payload = await response.json(content_type=None)
-
                     except (aiohttp.ContentTypeError, ValueError):
                         body_preview = (await response.text())[:300]
-
                         print(
                             "[ApexMapNotify] API response was not valid JSON. "
                             f"Body preview: {body_preview!r}"
@@ -174,7 +172,6 @@ class ApexMapNotify(commands.Cog):
             return None
 
         current = mode_data.get("current")
-
         return current if isinstance(current, dict) else None
 
     @staticmethod
@@ -185,7 +182,6 @@ class ApexMapNotify(commands.Cog):
             return None
 
         next_map = mode_data.get("next")
-
         return next_map if isinstance(next_map, dict) else None
 
     @staticmethod
@@ -193,22 +189,14 @@ class ApexMapNotify(commands.Cog):
         if not data:
             return "Unknown"
 
-        return (
-            data.get("map")
-            or data.get("mapName")
-            or "Unknown"
-        )
+        return data.get("map") or data.get("mapName") or "Unknown"
 
     @staticmethod
     def _map_code(data):
         if not data:
             return None
 
-        return (
-            data.get("code")
-            or data.get("map")
-            or data.get("mapName")
-        )
+        return data.get("code") or data.get("map") or data.get("mapName")
 
     @staticmethod
     def _remaining_time(data):
@@ -225,7 +213,6 @@ class ApexMapNotify(commands.Cog):
         if remaining is not None:
             try:
                 remaining = int(remaining)
-
                 hours = remaining // 3600
                 minutes = (remaining % 3600) // 60
                 seconds = remaining % 60
@@ -268,9 +255,7 @@ class ApexMapNotify(commands.Cog):
             inline=False,
         )
 
-        embed.set_footer(
-            text="Data provided by Apex Legends Status"
-        )
+        embed.set_footer(text="Data provided by Apex Legends Status")
 
         return embed
 
@@ -294,13 +279,7 @@ class ApexMapNotify(commands.Cog):
                 FROM apex_map_notifications
             """).fetchall()
 
-        for (
-            guild_id,
-            channel_id,
-            stored_pubs_code,
-            stored_ranked_code,
-        ) in settings:
-
+        for guild_id, channel_id, stored_pubs_code, stored_ranked_code in settings:
             guild = self.bot.get_guild(guild_id)
 
             if guild is None:
@@ -315,15 +294,8 @@ class ApexMapNotify(commands.Cog):
             new_ranked_code = stored_ranked_code
 
             # Pubs rotation
-            pubs_current = self._get_current(
-                rotation,
-                "battle_royale",
-            )
-
-            pubs_next = self._get_next(
-                rotation,
-                "battle_royale",
-            )
+            pubs_current = self._get_current(rotation, "battle_royale")
+            pubs_next = self._get_next(rotation, "battle_royale")
 
             if pubs_current:
                 current_pubs_code = self._map_code(pubs_current)
@@ -349,22 +321,13 @@ class ApexMapNotify(commands.Cog):
                             )
 
                         except discord.HTTPException as e:
-                            print(
-                                f"[ApexMapNotify] Discord error: {e!r}"
-                            )
+                            print(f"[ApexMapNotify] Discord error: {e!r}")
 
                         new_pubs_code = current_pubs_code
 
             # Ranked rotation
-            ranked_current = self._get_current(
-                rotation,
-                "ranked",
-            )
-
-            ranked_next = self._get_next(
-                rotation,
-                "ranked",
-            )
+            ranked_current = self._get_current(rotation, "ranked")
+            ranked_next = self._get_next(rotation, "ranked")
 
             if ranked_current:
                 current_ranked_code = self._map_code(ranked_current)
@@ -390,9 +353,7 @@ class ApexMapNotify(commands.Cog):
                             )
 
                         except discord.HTTPException as e:
-                            print(
-                                f"[ApexMapNotify] Discord error: {e!r}"
-                            )
+                            print(f"[ApexMapNotify] Discord error: {e!r}")
 
                         new_ranked_code = current_ranked_code
 
@@ -436,15 +397,8 @@ class ApexMapNotify(commands.Cog):
             )
             return
 
-        pubs_current = self._get_current(
-            rotation,
-            "battle_royale",
-        )
-
-        ranked_current = self._get_current(
-            rotation,
-            "ranked",
-        )
+        pubs_current = self._get_current(rotation, "battle_royale")
+        ranked_current = self._get_current(rotation, "ranked")
 
         self._set_settings(
             ctx.guild.id,
@@ -479,31 +433,16 @@ class ApexMapNotify(commands.Cog):
             return
 
         channel_id, pubs_code, ranked_code = settings
-
         channel = ctx.guild.get_channel(channel_id)
-
-        channel_text = (
-            channel.mention
-            if channel
-            else f"<#{channel_id}>"
-        )
+        channel_text = channel.mention if channel else f"<#{channel_id}>"
 
         embed = discord.Embed(
             title="🗺️ Apex Map Notification Status",
             color=discord.Color.blue(),
         )
 
-        embed.add_field(
-            name="Status",
-            value="🟢 Enabled",
-            inline=True,
-        )
-
-        embed.add_field(
-            name="Channel",
-            value=channel_text,
-            inline=True,
-        )
+        embed.add_field(name="Status", value="🟢 Enabled", inline=True)
+        embed.add_field(name="Channel", value=channel_text, inline=True)
 
         embed.add_field(
             name="Pubs Tracked",
@@ -563,9 +502,7 @@ class ApexMapNotify(commands.Cog):
             )
 
         elif isinstance(error, commands.MissingRequiredArgument):
-            await ctx.send(
-                "Usage: `!setmapnotify #channel`"
-            )
+            await ctx.send("Usage: `!setmapnotify #channel`")
 
         elif isinstance(error, commands.BadArgument):
             await ctx.send(
@@ -583,7 +520,6 @@ class ApexMapNotify(commands.Cog):
                 "❌ You need **Manage Server** permission "
                 "to disable map notifications."
             )
-
         else:
             raise error
 
