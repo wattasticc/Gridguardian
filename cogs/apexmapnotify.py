@@ -11,8 +11,7 @@ from discord.ext import commands, tasks
 
 
 DB_PATH = "gridguardian.db"
-API_URL = "https://api.apexlegendsstatus.com/maprotation"
-
+API_URL = "https://api.apexlegendsstatus.com/maprotation.php"
 
 class ApexMapNotify(commands.Cog):
     """Automatic Apex Legends map rotation notifications."""
