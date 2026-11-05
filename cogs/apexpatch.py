@@ -24,12 +24,10 @@ EA_BASE_URL = "https://www.ea.com"
 CHECK_INTERVAL = 10 * 60
 
 # Set these in your hosting provider's environment variables.
-# Use the free Groq tier and do not add a paid billing plan.
 GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 GROQ_MODEL = os.getenv("GROQ_MODEL", "openai/gpt-oss-20b")
 GROQ_CHAT_URL = "https://api.groq.com/openai/v1/chat/completions"
 
-# Keep article input bounded in case EA includes unrelated page content.
 MAX_ARTICLE_CHARACTERS = 60000
 DISCORD_MESSAGE_LIMIT = 1900
 
@@ -40,6 +38,7 @@ class _ArticleTextParser(HTMLParser):
     BLOCK_TAGS = {
         "h1", "h2", "h3", "h4", "p", "li", "blockquote", "tr"
     }
+
     SKIP_TAGS = {
         "script", "style", "noscript", "svg", "nav", "header",
         "footer", "aside", "form", "button"
@@ -87,6 +86,7 @@ class _ArticleTextParser(HTMLParser):
 
         if tag in self.BLOCK_TAGS:
             self.block_depth -= 1
+
             if self.block_depth <= 0:
                 text = re.sub(
                     r"\s+",
@@ -104,6 +104,7 @@ class _ArticleTextParser(HTMLParser):
     def handle_data(self, data):
         if not self.skip_depth and self.block_tag:
             cleaned = data.strip()
+
             if cleaned:
                 self.block_parts.append(cleaned)
 
@@ -126,9 +127,11 @@ class ApexPatch(commands.Cog):
             timeout=30,
             check_same_thread=False
         )
+
         db.execute("PRAGMA busy_timeout = 30000")
         db.execute("PRAGMA journal_mode = WAL")
         db.execute("PRAGMA synchronous = NORMAL")
+
         return db
 
     def _init_database(self):
@@ -159,6 +162,7 @@ class ApexPatch(commands.Cog):
 
         row = cursor.fetchone()
         db.close()
+
         return row
 
     def _get_all_settings(self):
@@ -172,6 +176,7 @@ class ApexPatch(commands.Cog):
 
         rows = cursor.fetchall()
         db.close()
+
         return rows
 
     def _save_settings(
@@ -223,6 +228,7 @@ class ApexPatch(commands.Cog):
                 "(compatible; GridGuardian/1.0)"
             )
         }
+
         timeout = aiohttp.ClientTimeout(total=25)
 
         try:
@@ -230,7 +236,11 @@ class ApexPatch(commands.Cog):
                 timeout=timeout,
                 headers=headers
             ) as session:
-                async with session.get(EA_GAME_UPDATES_URL) as response:
+
+                async with session.get(
+                    EA_GAME_UPDATES_URL
+                ) as response:
+
                     if response.status != 200:
                         print(
                             "[ApexPatch] EA returned "
@@ -243,9 +253,11 @@ class ApexPatch(commands.Cog):
         except aiohttp.ClientError as e:
             print(f"[ApexPatch] EA request failed: {e}")
             return None
+
         except asyncio.TimeoutError:
             print("[ApexPatch] EA request timed out")
             return None
+
         except Exception as e:
             print(f"[ApexPatch] Unexpected EA error: {e}")
             return None
@@ -257,6 +269,7 @@ class ApexPatch(commands.Cog):
         )
 
         matches = pattern.findall(html)
+
         if not matches:
             print(
                 "[ApexPatch] Could not find Game Update articles "
@@ -265,8 +278,13 @@ class ApexPatch(commands.Cog):
             return None
 
         article_urls = []
+
         for article_url in matches:
-            full_url = urljoin(EA_BASE_URL, unescape(article_url))
+            full_url = urljoin(
+                EA_BASE_URL,
+                unescape(article_url)
+            )
+
             if full_url not in article_urls:
                 article_urls.append(full_url)
 
@@ -275,6 +293,7 @@ class ApexPatch(commands.Cog):
                 session_headers=headers,
                 url=article_url
             )
+
             if article:
                 return article
 
@@ -288,13 +307,16 @@ class ApexPatch(commands.Cog):
                 timeout=timeout,
                 headers=session_headers
             ) as session:
+
                 async with session.get(url) as response:
+
                     if response.status != 200:
                         print(
                             "[ApexPatch] Article returned "
                             f"HTTP {response.status}: {url}"
                         )
                         return None
+
                     html = await response.text()
 
         except Exception as e:
@@ -308,6 +330,7 @@ class ApexPatch(commands.Cog):
             html,
             re.IGNORECASE | re.DOTALL
         )
+
         if title_match:
             title = self._clean_html(title_match.group(1))
 
@@ -317,6 +340,7 @@ class ApexPatch(commands.Cog):
                 html,
                 re.IGNORECASE | re.DOTALL
             )
+
             if title_match:
                 title = self._clean_html(title_match.group(1))
 
@@ -324,6 +348,7 @@ class ApexPatch(commands.Cog):
             title = "Apex Legends Game Update"
 
         date_text = None
+
         date_match = re.search(
             r"""
             (?:
@@ -335,33 +360,38 @@ class ApexPatch(commands.Cog):
             html,
             re.IGNORECASE | re.VERBOSE
         )
+
         if date_match:
             date_text = date_match.group(0)
 
-        # Extract headings, paragraphs, and list/table rows.
         parser = _ArticleTextParser()
+
         try:
             parser.feed(html)
             parser.close()
+
         except Exception as e:
             print(f"[ApexPatch] HTML parsing warning: {e}")
 
         article_text = "\n".join(parser.blocks)
 
-        # Some EA pages include the full article in JSON-LD.
+        # Fallback to articleBody in JSON-LD.
         if len(article_text) < 500:
             body_match = re.search(
                 r'"articleBody"\s*:\s*"((?:\\.|[^"\\])*)"',
                 html,
                 re.IGNORECASE | re.DOTALL
             )
+
             if body_match:
                 try:
                     json_body = json.loads(
                         '"' + body_match.group(1) + '"'
                     )
+
                     if len(json_body) > len(article_text):
                         article_text = json_body
+
                 except (json.JSONDecodeError, TypeError):
                     pass
 
@@ -386,6 +416,7 @@ class ApexPatch(commands.Cog):
         value = re.sub(r"<[^>]+>", " ", value)
         value = unescape(value)
         value = re.sub(r"\s+", " ", value)
+
         return value.strip()
 
     # =========================================================
@@ -393,17 +424,22 @@ class ApexPatch(commands.Cog):
     # =========================================================
 
     async def _summarize_patch(self, patch):
-        """Create a detailed summary using Groq's Chat Completions API."""
+        """Create a detailed summary using Groq's API."""
 
         api_key = os.getenv("GROQ_API_KEY")
+
         if not api_key:
             print(
                 "[ApexPatch] GROQ_API_KEY is missing. "
-                "Add it to the hosting environment variables."
+                "Add it to your hosting environment variables."
             )
             return None
 
-        article_text = patch.get("article_text", "").strip()
+        article_text = patch.get(
+            "article_text",
+            ""
+        ).strip()
+
         if len(article_text) < 150:
             print(
                 "[ApexPatch] Article text extraction returned too "
@@ -443,7 +479,8 @@ class ApexPatch(commands.Cog):
                     "role": "user",
                     "content": (
                         f"Article title: {patch['title']}\n"
-                        f"Published: {patch.get('date') or 'Date not found'}\n"
+                        f"Published: "
+                        f"{patch.get('date') or 'Date not found'}\n"
                         f"Official article URL: {patch['url']}\n\n"
                         "Full extracted article text:\n"
                         f"{article_text}"
@@ -466,10 +503,12 @@ class ApexPatch(commands.Cog):
                 timeout=timeout,
                 headers=headers
             ) as session:
+
                 async with session.post(
                     GROQ_CHAT_URL,
                     json=request_body
                 ) as response:
+
                     response_text = await response.text()
 
                     if response.status != 200:
@@ -485,17 +524,21 @@ class ApexPatch(commands.Cog):
         except asyncio.TimeoutError:
             print("[ApexPatch] Groq summary request timed out.")
             return None
+
         except aiohttp.ClientError as e:
             print(f"[ApexPatch] Groq request failed: {e}")
             return None
+
         except json.JSONDecodeError:
             print("[ApexPatch] Groq returned invalid JSON.")
             return None
+
         except Exception as e:
             print(f"[ApexPatch] Unexpected Groq error: {e}")
             return None
 
         choices = data.get("choices", [])
+
         if not choices:
             print("[ApexPatch] Groq returned no completion choices.")
             return None
@@ -514,7 +557,10 @@ class ApexPatch(commands.Cog):
     # =========================================================
 
     @staticmethod
-    def _split_discord_text(text, limit=DISCORD_MESSAGE_LIMIT):
+    def _split_discord_text(
+        text,
+        limit=DISCORD_MESSAGE_LIMIT
+    ):
         """Split long summaries without cutting words where possible."""
 
         chunks = []
@@ -526,12 +572,17 @@ class ApexPatch(commands.Cog):
                 break
 
             split_at = remaining.rfind("\n", 0, limit)
+
             if split_at < limit // 2:
                 split_at = remaining.rfind(" ", 0, limit)
+
             if split_at < limit // 2:
                 split_at = limit
 
-            chunks.append(remaining[:split_at].strip())
+            chunks.append(
+                remaining[:split_at].strip()
+            )
+
             remaining = remaining[split_at:].strip()
 
         return chunks
@@ -563,35 +614,42 @@ class ApexPatch(commands.Cog):
         )
 
         embed.set_footer(
-            text="AI summary generated from the official EA article • Grid Guardian"
+            text=(
+                "AI summary generated from the official EA article "
+                "• Grid Guardian"
+            )
         )
+
         return embed
 
     async def _send_patch_notification(self, channel, patch):
         summary = await self._summarize_patch(patch)
 
         if not summary:
-            # Do not send a misleading partial summary or mark the
-            # article as delivered. The background loop will retry.
             return False
 
         try:
-            await channel.send(embed=self._create_patch_embed(patch))
+            await channel.send(
+                embed=self._create_patch_embed(patch)
+            )
 
             chunks = self._split_discord_text(summary)
             total = len(chunks)
 
             for index, chunk in enumerate(chunks, start=1):
-                prefix = (
-                    f"**Patch Summary ({index}/{total})**\n"
-                    if total > 1
-                    else "**Patch Summary**\n"
-                )
+                if total > 1:
+                    prefix = (
+                        f"**Patch Summary ({index}/{total})**\n"
+                    )
+                else:
+                    prefix = "**Patch Summary**\n"
+
                 await channel.send(prefix + chunk)
 
             await channel.send(
                 f"🔗 **Official source:** {patch['url']}"
             )
+
             return True
 
         except discord.Forbidden:
@@ -600,6 +658,7 @@ class ApexPatch(commands.Cog):
                 f"in channel {channel.id}."
             )
             return False
+
         except discord.HTTPException as e:
             print(f"[ApexPatch] Discord send error: {e}")
             return False
@@ -611,6 +670,7 @@ class ApexPatch(commands.Cog):
     @tasks.loop(seconds=CHECK_INTERVAL)
     async def patch_check_loop(self):
         latest_patch = await self._fetch_latest_patch()
+
         if not latest_patch:
             return
 
@@ -624,10 +684,12 @@ class ApexPatch(commands.Cog):
         ) in settings:
 
             guild = self.bot.get_guild(guild_id)
+
             if guild is None:
                 continue
 
             channel = guild.get_channel(channel_id)
+
             if channel is None:
                 continue
 
@@ -647,8 +709,7 @@ class ApexPatch(commands.Cog):
                     latest_patch
                 )
 
-                # Save only after successful delivery. If the API or
-                # Discord is temporarily unavailable, retry next cycle.
+                # Save only after successful delivery.
                 if delivered:
                     self._save_settings(
                         guild_id,
@@ -662,7 +723,7 @@ class ApexPatch(commands.Cog):
         await self.bot.wait_until_ready()
 
     # =========================================================
-    # COMMANDS
+    # SET PATCH NOTES CHANNEL
     # =========================================================
 
     @commands.command(name="setapexpatch")
@@ -704,12 +765,18 @@ class ApexPatch(commands.Cog):
             ),
             color=discord.Color.green()
         )
+
         embed.add_field(
             name="Currently Tracking",
             value=latest_patch["title"],
             inline=False
         )
+
         await ctx.send(embed=embed)
+
+    # =========================================================
+    # PATCH NOTES STATUS
+    # =========================================================
 
     @commands.command(name="apexpatchstatus")
     async def apex_patch_status(self, ctx):
@@ -725,28 +792,38 @@ class ApexPatch(commands.Cog):
             return
 
         channel_id, last_url, last_title = settings
+
         channel = ctx.guild.get_channel(channel_id)
-        channel_text = channel.mention if channel else f"<#{channel_id}>"
+
+        channel_text = (
+            channel.mention
+            if channel
+            else f"<#{channel_id}>"
+        )
 
         embed = discord.Embed(
             title="🔴 Apex Patch Notification Status",
             color=discord.Color.blue()
         )
+
         embed.add_field(
             name="Status",
             value="🟢 Enabled",
             inline=True
         )
+
         embed.add_field(
             name="Channel",
             value=channel_text,
             inline=True
         )
+
         embed.add_field(
             name="Last Recorded Update",
             value=last_title or "None",
             inline=False
         )
+
         if last_url:
             embed.add_field(
                 name="Article",
@@ -763,10 +840,16 @@ class ApexPatch(commands.Cog):
             ),
             inline=False
         )
+
         embed.set_footer(
             text="Checking EA Game Updates automatically"
         )
+
         await ctx.send(embed=embed)
+
+    # =========================================================
+    # DISABLE PATCH NOTES
+    # =========================================================
 
     @commands.command(name="disableapexpatch")
     @commands.has_guild_permissions(manage_guild=True)
@@ -774,6 +857,7 @@ class ApexPatch(commands.Cog):
         """Disable automatic Apex patch notifications."""
 
         settings = self._get_settings(ctx.guild.id)
+
         if not settings:
             await ctx.send(
                 "🔴 Apex patch notifications are already disabled."
@@ -790,6 +874,7 @@ class ApexPatch(commands.Cog):
             ),
             color=discord.Color.red()
         )
+
         await ctx.send(embed=embed)
 
     # =========================================================
@@ -803,18 +888,24 @@ class ApexPatch(commands.Cog):
                 "❌ You need **Manage Server** permission to "
                 "configure Apex patch notifications."
             )
+
         elif isinstance(error, commands.BotMissingPermissions):
             await ctx.send(
                 "❌ I need permission to send messages and embed "
                 "links in that channel."
             )
+
         elif isinstance(error, commands.MissingRequiredArgument):
-            await ctx.send("Usage: `!setapexpatch #channel`")
+            await ctx.send(
+                "Usage: `!setapexpatch #channel`"
+            )
+
         elif isinstance(error, commands.BadArgument):
             await ctx.send(
                 "❌ I couldn't find that channel.\n"
                 "Use: `!setapexpatch #channel`"
             )
+
         else:
             raise error
 
